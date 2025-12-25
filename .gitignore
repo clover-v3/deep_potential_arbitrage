@@ -1,0 +1,26 @@
+# Data
+data/
+cached/
+test_data_root/
+test_ghz_data/
+
+# Outputs & Artifacts
+results/
+experiments/
+*.csv
+*.xlsx
+*.parquet
+*.pkl
+*.pth
+*.png
+*.pdf
+
+# System
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+
+# Brain
+.gemini/

@@ -1,0 +1,789 @@
+Deep Mean-Reversion: A Physics-Informed Contrastive Approach
+to Pairs Trading
+Namhyoung Kim
+Hanyang University
+Seoul, Republic of Korea
+x7jeon8gi@hanyang.ac.krYosep Na
+Hanyang University
+Seoul, Republic of Korea
+skdytpq@hanyang.ac.krJae Wook Song
+Hanyang University
+Seoul, Republic of Korea
+jwsong@hanyang.ac.kr
+Abstract
+Traditional pairs trading strategies often fail to identify stable mean-
+reverting relationships amid the complex dynamics characterizing
+modern financial markets, resulting in unstable spreads and re-
+duced efficacy of conventional, rule-based execution methods. To
+overcome these intrinsic limitations, this study introduces ORCA
+(Ornstein-Uhlenbeck Reversion and Contrastive Arbitrage), a novel
+framework that seamlessly integrates deep representation learn-
+ing and a rigorous financial dynamics model into a unified train-
+ing paradigm. Central to ORCA is a physics-informed regulariza-
+tion approach designed to identify asset clusters that exhibit not
+merely similarity, but intrinsic tradability characterized by robust
+dynamic properties. ORCA concurrently optimizes a contrastive
+learning module alongside a Physics-Informed Neural Network
+(PINN) module, where the latter serves as a regularizer enforcing
+cluster formation consistent with the statistical dynamics of a stable
+Ornstein-Uhlenbeck process. Consequently, ORCA systematically
+produces asset clusters with inherently superior mean-reversion
+characteristics. Empirical analysis conducted on the NYSE dataset
+demonstrates the practical effectiveness of ORCA: applying a simple
+mean-reversion trading strategy with a static threshold to ORCA-
+generated clusters significantly outperforms strategies employing
+clusters derived via alternative benchmark methodologies. These
+findings position ORCA as a new benchmark methodology in the
+realm of structure-aware statistical arbitrage. A comprehensive
+overview of empirical results is provided in Figure 1.
+CCS Concepts
+•Computing methodologies →Learning latent representa-
+tions ;•Applied computing →Economics ;Business intelligence .
+Keywords
+Contrastive Learning, Physics-Informed Neural Networks, Mean-
+Reversion, Pairs-trading, Portfolio
+ACM Reference Format:
+Namhyoung Kim, Yosep Na, and Jae Wook Song. 2025. Deep Mean-Reversion:
+A Physics-Informed Contrastive Approach to Pairs Trading. In 6th ACM
+International Conference on AI in Finance (ICAIF ’25), November 15–18, 2025,
+Singapore, Singapore. ACM, New York, NY, USA, 8 pages. https://doi.org/10.
+1145/3768292.3770406
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+ICAIF ’25, Singapore, Singapore
+©2025 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2220-2/25/11
+https://doi.org/10.1145/3768292.3770406
+Figure 1: Overall performance comparison.
+1 Introduction
+Pairs trading [ 5] is a market-neutral strategy that leverages the
+mean-reverting nature of spreads between assets sharing com-
+mon economic links. Its principle involves identifying asset pairs
+whose prices have historically co-moved and executing arbitrage
+trades—taking a long position in the underperforming asset and a
+short position in the outperforming one—when their price spread
+diverges from statistical equilibrium.
+However, the success of this traditional approach faces two fun-
+damental challenges. First, the pair selection process often fails
+to capture complex, nonlinear relationships between assets. Tradi-
+tional statistical methods frequently rely on superficial similarities
+in raw feature space, which can lead to the selection of unstable
+pairs in dynamic market environments [ 29]. Second, the low qual-
+ity of the selected pairs inherently amplifies instability during the
+trade execution phase. Spreads derived from these suboptimal pairs
+are often noisy and exhibit weak mean-reverting characteristics.
+Consequently, when a simple rule-based method is applied to these
+unstable signals, it inevitably leads to inefficient outcomes, such as
+being whipsawed by noise or failing to capture faint signals.
+To transcend these limitations, we introduce ORCA (Ornstein-
+Uhlenbeck Reversion and Contrastive Arbitrage), a novel frame-
+work that synergistically integrates deep representation learning
+with an economic theory-based financial model within a single,
+unified training process. ORCA’s core innovation lies in identifying
+405
+
+ICAIF ’25, November 15–18, 2025, Singapore, Singapore Kim et al.
+asset clusters that are not merely similar, but are inherently trad-
+able with strong dynamic properties, a concept we enforce through
+physics-informed regularization.
+Our framework simultaneously optimizes a contrastive learn-
+ing module and a Physics-Informed Neural Network (PINN) mod-
+ule [25]. While contrastive learning [ 2] elucidates the latent struc-
+tures within the data to build robust asset representations, the PINN
+module acts as a regularizer. It compels the clustering framework
+to form groups whose members collectively adhere to the statistical
+properties of a stable Ornstein-Uhlenbeck (OU) stochastic differ-
+ential equation. Through this integrated learning process, ORCA
+evolves to produce higher-quality asset clusters with intrinsically
+enhanced mean-reverting characteristics.
+The main contributions of this paper are as follows:
+•A novel end-to-end framework integrating contrastive learn-
+ing with Physics-Informed Neural Networks (PINN) is pro-
+posed to systematically identify intrinsically tradable asset
+clusters.
+•A new learning paradigm leveraging PINNs as a regular-
+ization mechanism is introduced, compelling the clustering
+process to adhere strictly to established financial engineering
+dynamics, specifically the Ornstein-Uhlenbeck process.
+•Comprehensive empirical validation using extensive real-
+world NYSE market data demonstrates that conventional
+mean-reversion trading strategies significantly outperform
+alternative benchmark methodologies when applied to clus-
+ters identified by the proposed ORCA framework.
+2 Related Works
+2.1 Contrastive Learning
+Contrastive learning [ 24] is a promising paradigm in self-supervised
+learning, recently achieving new benchmarks in representation
+learning in fields such as computer vision [ 2,10,15] and natural
+language processing [ 6]. The fundamental idea of this approach is
+to map the original data into a representation space, wherein the
+similarities of positive pairs are maximized while those of negative
+pairs are minimized [ 12]. We primarily follow the SimCLR’s [ 2]
+temperature-scaled cross-entropy loss (NT-Xent). Building a pos-
+itive pair through data augmentation is essential for contrastive
+learning. In computer vision, positive pairs are created by perform-
+ing random transformations on the same image, such as cropping,
+flipping, and jittering [ 10,15]. Natural language processing uses
+methods such as dropout [ 6] and discrete masking [ 3] to build posi-
+tive pairs. Unlike the above two areas, we take a different approach
+to building positive pairs for tabular data by using random masking,
+which randomly erases values as zero, and Gaussian noise.
+2.2 Physics-Informed Neural Networks in
+Finance
+Physics-Informed Neural Networks (PINNs) have emerged as a
+powerful tool for modeling systems governed by differential equa-
+tions [ 25]. The core idea of the PINNs paradigm is to incorporate
+the residual of a differential equation into the neural network’s loss
+function, thereby compelling the model to not only fit the data but
+also adhere to the underlying physical law. This paradigm has beensuccessfully applied in financial engineering, particularly for option
+pricing. For instance, PINNs have been utilized to solve the Black-
+Scholes Partial Differential Equation (PDE) in data-scarce regions,
+price exotic options, and calibrate market volatility surfaces [ 7,13].
+These studies demonstrate the effectiveness of PINNs in model-
+ing the complex dynamics of financial markets. Our work applies
+this idea to pairs trading by incorporating the Ornstein-Uhlenbeck
+(OU) Stochastic Differential Equation (SDE), which governs the
+mean-reverting dynamics of a spread, into the learning process.
+2.3 Machine Learning in Pairs Trading
+Recent developments in pairs trading have focused on integrating
+machine learning techniques to enhance performance. Unsuper-
+vised learning methods, such as clustering algorithms, have been
+employed to identify complex, non-linear relationships that tradi-
+tional statistical measures may overlook [ 26]. For example, K-means
+clustering has been utilized to group assets based on similarities in
+their feature representations, providing a more nuanced approach
+than linear models. Meanwhile, reinforcement learning (RL) has also
+been explored as a promising avenue in pairs trading [ 1,18,31]. RL
+agents optimize trading strategies by learning directly from market
+dynamics via a reward mechanism. However, RL can often overfit
+to specific asset pairs and its need for direct interaction with the
+environment can make it challenging to apply to a large universe
+of assets.
+Most existing approaches tend to focus on either improving pair
+selection or enhancing trading execution. In this paper, we propose
+to unify robust, data-driven pairing via contrastive learning with
+financial dynamic modeling through the integration of a PINN
+framework.
+3 Method
+Our proposed framework, ORCA, is designed to identify inherently
+tradable asset clusters through a unified, end-to-end training pro-
+cess. This is achieved through three interconnected components: (1)
+a Backbone Architecture that extracts rich, dynamic representations
+for each asset from raw data; (2) a Physics-Informed Contrastive
+Clustering module that uses a novel unified loss function to simul-
+taneously learn asset similarities and enforce that the resulting
+clusters adhere to the principles of mean-reversion, specifically the
+Ornstein-Uhlenbeck (OU) process; and (3) a Cluster-Based Trading
+Strategy that leverages these high-quality clusters to execute trades.
+The overall architecture is depicted in Figure 2.
+3.1 Backbone Architecture
+The backbone is designed to extract rich asset representations us-
+ing a feature encoder and a bidirectional transformer. Since deep
+learning models can underperform boosting methods on tabular
+data [ 11,27], we employ a specialized feature encoder based on
+Piece-wise Linear Encoding (PLE), a modern binning approach with
+proven success in tabular deep learning [ 9,21]. Unlike continuous
+embeddings such as linear layers, PLE explicitly preserves ordi-
+nal relationships and creates informative representations robust
+to outliers. The resulting tokens are processed by a bidirectional
+transformer [ 28], which excels at capturing the complex relation-
+ships between all input features, such as firm characteristics and
+406
+Deep Mean-Reversion: A Physics-Informed Contrastive Approach to Pairs Trading ICAIF ’25, November 15–18, 2025, Singapore, Singapore
+Figure 2: Overall architecture of ORCA. Input features Xare tokenized via PLE and augmented into two views, which are
+processed by a shared transformer encoder to produce representations h𝑎and h𝑏. The model optimizes three objectives: instance-
+level contrastLins, cluster-level contrast Lclu, and physics-informed regularization LPINN that enforces Ornstein-Uhlenbeck
+dynamics with parameters (ˆ𝜃𝑘,ˆ𝜇𝑘,ˆ𝜎𝑘).
+price momentum [ 17,30]. This backbone ultimately outputs a rep-
+resentation vector hfor each asset.
+3.1.1 Tabular feature encoder. The feature encoder transforms
+structured tabular data, where the 𝑘-th numerical feature 𝑥𝑘is
+encoded as ˜𝑥𝑘=enc𝑘(𝑥𝑘) ∈R𝑑. Here, enc𝑘(·)is the encoder
+for the𝑘-th feature and 𝑑is the embedding dimensionality. The
+encoding process begins with binning. First, we normalize all fea-
+tures using a standard scaler. Then, for each feature 𝑘, we define𝑇
+bins,𝐵1,...,𝐵𝑇, with boundaries[𝑏𝑜,𝑏1),...,[𝑏𝑇−1,𝑏𝑇]. The first
+bin𝐵1=(−∞,𝑏2)and the last bin 𝐵𝑇=[𝑏𝑇−1,∞)are unbounded
+to ensure complete coverage of the feature domain. For a given
+scalar value 𝑥, the PLE function transforms it into a 𝑇-dimensional
+vector PLE(𝑥)=[𝑒1,...,𝑒𝑇]. The value of each component 𝑒𝑡is
+determined by the following conditions:
+𝑒𝑡= 
+0, if𝑥<𝑏𝑡−1and𝑡>1
+1, if𝑥≥𝑏𝑡and𝑡<𝑇
+𝑥−𝑏𝑡−1
+𝑏𝑡−𝑏𝑡−1,otherwise(1)
+This encoding produces a cumulative representation: bins entirely
+below𝑥𝑘are set to 1, the bin containing 𝑥𝑘receives a fractional
+value based on its relative position within that bin, and bins above
+𝑥𝑘are set to 0. This creates a dense, ordered representation of
+the numerical feature. Finally, this 𝑇-dimensional vector is passed
+through a trainable linear layer to produce the final 𝑑-dimensional
+embedding that is fed into the transformer:
+˜𝑥𝑘=Linear(PLE(𝑥𝑘)) (2)
+3.1.2 Feature transformer. The feature transformer compresses
+the characteristics of each asset into a single vector. To improve
+the modeling of the complex relationships between asset charac-
+teristics, we use a bidirectional transformer. This transformer is
+internally structured with a multi-headed self-attention mechanism,
+which allows it to reflect multifaceted information, including the
+relationship between firm characteristics and price momentum,
+from different perspectives within the feature vector. As a result,
+the feature vector is embedded in the feature vector space withmore comprehensive attributes. The mathematical formulation of
+the multi-headed attention mechanism in our model is as follows:
+Attention(𝑄,𝐾,𝑉)=softmax 
+𝑄𝐾𝑇
+√︁
+𝑑𝑘!
+𝑉 (3)
+head𝑖=Attention(𝑄𝑊𝑄
+𝑖,𝐾𝑊𝐾
+𝑖,𝑉𝑊𝑉
+𝑖)
+MultiHead(𝑄,𝐾,𝑉)=Concat(head 1,..., headℎ)𝑊𝑂
+Similar to BERT [ 4], the successful transformer architecture in
+natural language processing, we append a special [CLS] token with
+a learned embedding to the beginning of each data sample. Let
+xi=[[CLS],˜x𝑖
+1,˜x𝑖
+2,..., ˜x𝑖𝑛]be the input sequence for a single asset,
+composed of its features ˜x𝑖
+𝑘encoded by binning. Let 𝑓(·)be the
+feature transformer. The input sequence xiis transformed into a
+sequence of hidden states, and the final representation for the asset,
+h𝑖, is taken from the output corresponding to the [CLS] token’s
+position via hi=𝑓(xi)[CLS] . This [CLS] token’s output vector
+summarizes the information from all feature tokens through the
+self-attention mechanism.
+3.2 Physics-Informed Contrastive Clustering
+Using the representation vector hfrom the backbone, we train our
+model by optimizing a unified loss function with three objectives:
+(1) learning instance-level representations, (2) forming a cluster-
+level structure, and (3) ensuring the financial-dynamic validity of
+the formed clusters.
+3.2.1 Contrastive Representation Learning. Our representation learn-
+ing is based on contrastive learning performed at two simultaneous
+levels: the instance level and the cluster level. This dual approach
+guides the model to learn the unique characteristics of individual
+assets while concurrently forming a coherent macroscopic structure
+among groups of assets.
+First, instance-level contrastive learning trains the model to
+learn a unique representation for each asset. The success of this
+hinges on the construction of positive pairs through effective data
+augmentation. To preserve the inherent characteristics of tabular
+407
+ICAIF ’25, November 15–18, 2025, Singapore, Singapore Kim et al.
+data while obtaining superior representation vectors, we employ
+two relatively simple augmentation techniques: random masking
+(𝜙mask), which sets a fraction of feature values to zero, and the
+addition of Gaussian noise ( 𝜙Gauss ). These augmentations mirror
+real-world data imperfections in financial markets, such as missing
+fundamental data and noisy price observations, ensuring robustness
+without introducing additional complexity.
+An original input xis transformed into two different views, x𝑎=
+𝜙mask(x)andx𝑏=𝜙Gauss(x). These augmented inputs are passed
+through the backbone architecture 𝑓(·)and a non-linear projection
+head𝑔ins(·)to be mapped into final representation vectors z𝑎and
+z𝑏. The objective of instance contrastive learning is to maximize
+the similarity between z𝑎andz𝑏, which originate from the same
+source, while minimizing their similarity to all other samples in the
+minibatch. Following SimCLR, the loss function for a given sample
+x𝑎
+𝑖is defined as:
+ℓ𝑎
+𝑖=−logexp(𝑠(z𝑎
+𝑖,z𝑏
+𝑖)/𝜏)
+Í𝑁
+𝑗=1[exp(𝑠(z𝑎
+𝑖,z𝑎
+𝑗)/𝜏)+exp(𝑠(z𝑎
+𝑖,z𝑏
+𝑗)/𝜏)],(4)
+where z=𝑔ins(𝑓(x)),𝑠(·,·)is the cosine similarity, and 𝜏is a tem-
+perature hyperparameter. The total instance loss, Lins, is computed
+as the average over all positive pairs:
+Lins=1
+2𝑁𝑁∑︁
+𝑖=1(ℓ𝑎
+𝑖+ℓ𝑏
+𝑖). (5)
+However, instance-level contrastive learning alone may not be
+sufficient to form well-separated clusters. To complement this, we
+introduce cluster-level contrastive learning. The hidden state h
+from the backbone is fed into a separate cluster projection head,
+𝑔clu(·), which outputs a soft label vector y∈R𝑀, representing the
+probability of an asset belonging to each of the 𝑀clusters.
+Cluster-level contrastive learning treats the cluster assignment
+probability vectors from the two augmented views of the same
+asset, y𝑎
+𝑖andy𝑏
+𝑖, as a positive pair. The loss function is designed to
+maximize their similarity while minimizing their similarity to the
+cluster assignments of all other samples.
+ˆℓ𝑎
+𝑖=−logexp(𝑠(y𝑎
+𝑖,y𝑏
+𝑖)/𝜏𝑐)
+Í𝑁
+𝑗=1[exp(𝑠(y𝑎
+𝑖,y𝑎
+𝑗)/𝜏𝑐)+exp(𝑠(y𝑎
+𝑖,y𝑏
+𝑗)/𝜏𝑐)],(6)
+where𝜏𝑐is the cluster-level temperature parameter. To prevent a
+trivial solution where all assets collapse into a single cluster, we
+add a term that maximizes the entropy of the cluster assignments,
+H(𝑌). The final cluster loss is:
+Lclu=1
+2𝑁𝑁∑︁
+𝑖=1(ˆℓ𝑎
+𝑖+ˆℓ𝑏
+𝑖)−H(𝑌). (7)
+This dual contrastive learning process enables the model to form se-
+mantically consistent clusters based on feature similarity. However,
+clusters formed this way do not guarantee statistically significant
+trading opportunities, as they are based on feature similarity alone,
+not on the strength of their mean-reverting properties. To overcome
+this limitation, we introduce the physics-informed regularization,
+as described in the next section.3.2.2 Physics-Informed Regularization. Clusters formed by feature
+similarity alone do not guarantee statistically significant trading
+opportunities. To bridge this gap, we introduce a physics-informed
+regularizer based on the Ornstein-Uhlenbeck (OU) process, which
+models mean-reverting dynamics. We assume that within each
+cluster𝑘, asset returns follow a common OU process:
+𝑑𝑟𝑡=𝜃𝑘(𝜇𝑘−𝑟𝑡)𝑑𝑡+𝜎𝑘𝑑𝑊𝑡, (8)
+where𝑟𝑡represents the return process, 𝜃𝑘is the speed of mean
+reversion,𝜇𝑘is the long-term equilibrium return, and 𝜎𝑘is the
+volatility for cluster 𝑘. Rather than assuming these parameters are
+static, our model dynamically predicts them for each cluster. This is
+achieved by first defining a cluster representation vector, ¯h𝑘, which
+is the weighted average of the representations of assets assigned to
+that cluster:
+¯h𝑘=Í
+𝑖𝑃𝑖𝑘·h𝑖Í
+𝑖𝑃𝑖𝑘+𝜖, (9)
+where𝑃𝑖𝑘is the soft probability that asset 𝑖belongs to cluster 𝑘. This
+aggregated representation is then fed into a dedicated parameter-
+generating neural network, 𝑔OU(·), to yield the cluster’s specific
+OU parameters:
+[ˆ𝜃𝑘,ˆ𝜇𝑘,ˆ𝜎𝑘]=𝑔OU(¯h𝑘). (10)
+This dynamic approach allows the model to derive a cluster’s finan-
+cial dynamics from the characteristics of its constituent members.
+The physics-informed regularization LPINN measures how well
+these parameters explain the observed return dynamics of assets
+assigned to each cluster. For asset 𝑖with return series 𝑟𝑖(𝑡), the
+discretized residuals, 𝑅𝑖𝑘(𝑡), which represents the deviation from
+the predicted OU dynamics of cluster 𝑘:
+𝑅𝑖𝑘(𝑡)=(𝑟𝑖(𝑡)−𝑟𝑖(𝑡−Δ𝑡))−ˆ𝜃𝑘(ˆ𝜇𝑘−𝑟𝑖(𝑡−Δ𝑡))Δ𝑡 (11)
+Assuming these residuals are Gaussian, the loss is formulated as the
+weighted negative log-likelihood. The final physics-informed regu-
+larization encourages the model to form clusters whose members
+exhibit coherent, predictable mean-reverting behavior:
+LPINN=1
+𝑁𝑁∑︁
+𝑖=1𝐾∑︁
+𝑘=1𝑃𝑖𝑘 
+log(ˆ𝜎𝑘)+E𝑡[𝑅𝑖𝑘(𝑡)2]·
+2ˆ𝜎2
+𝑘Δ𝑡!
+, (12)
+where E𝑡[·]denotes the expectation over time. This loss encourages
+the model to form clusters whose members exhibit coherent mean-
+reverting dynamics, effectively integrating financial principles into
+the clustering objective and producing groups that are inherently
+suitable for pairs trading strategies.
+3.2.3 Unified Training Objective. The final model is trained end-to-
+end by minimizing a single, combined loss function that harmonizes
+representation learning, clustering, and financial dynamics:
+Ltotal=Lins+𝛼Lclu+𝛽LPINN, (13)
+where𝛼and𝛽are hyperparameters that balance the objectives. This
+unified training process guides the model to discover clusters that
+are not merely similar based on static features, but are inherently
+tradable with strong, verifiable mean-reverting characteristics.
+408
+Deep Mean-Reversion: A Physics-Informed Contrastive Approach to Pairs Trading ICAIF ’25, November 15–18, 2025, Singapore, Singapore
+3.3 Cluster-Based Trading Strategy
+The core contribution of the ORCA framework is not to innovate
+the trading rules, but to fundamentally improve the quality of the
+asset groups being traded. Therefore, to demonstrate the superi-
+ority of the tradable clusters generated by ORCA, we deliberately
+apply a simple and conventional mean-reversion trading strategy.
+This strategy constructs spreads based on the prior month’s re-
+turn ( mom 1) within each cluster and uses a static threshold for
+trade execution. The process is as follows. At each rebalancing
+period𝑡, ORCA groups all assets into 𝐾clusters,{C1,...,C𝐾}. For
+each clusterC𝑘, we determine long and short positions. First, we
+sort the assets within the cluster by their prior one-month return,
+𝑅𝑡−1, to identify the top-performing (overvalued candidates) and
+bottom-performing (undervalued candidates) groups. The return
+differential between these two groups defines a momentum spread .
+A trading position is then initiated only when an asset’s momentum
+spread exceeds a statistically significant level (e.g., a multiple 𝛾of
+the standard deviation of all spreads). Long positions are taken
+in the assets that have underperformed the most relative to their
+cluster peers, and short positions are taken in the assets that have
+overperformed the most. By evaluating the performance of this
+simple, rule-based strategy when applied to ORCA’s clusters versus
+its performance on clusters formed by other methodologies, we can
+clearly assess the practical value added by our physics-informed reg-
+ularization. The detailed procedure of this strategy is summarized
+in Algorithm 1.
+Algorithm 1 Cluster-Based Mean-Reversion Strategy
+Require: Feature data X𝑡, Return data 𝑅, Trained Model 𝑓(·),
+Threshold factor 𝛾
+Ensure: Period log return 𝑟𝑡
+1:Cluster: Use model 𝑓(X𝑡)to assign all assets to clusters
+{C1,...,C𝐾}.
+2:Momentum Spread: For each asset 𝑥in a clusterC𝑘, compute
+its momentum spread Δ(𝑥)based on its rank of 𝑅𝑡−1(𝑥)within
+the cluster (see Section 3.3).
+3:𝜎Δ←std({Δ(𝑥)|∀𝑥}) ⊲Standard deviation of all spreads
+4:Initialize asset signals 𝑠(𝑥)← 0for all𝑥.
+5:foreach asset𝑥∈{C 1,...,C𝐾}do
+6: ifΔ(𝑥)<−𝛾·𝜎Δthen ⊲Long position
+7:𝑠(𝑥)←+ 1
+8: else if Δ(𝑥)>𝛾·𝜎Δthen ⊲Short position
+9:𝑠(𝑥)←− 1
+10: end if
+11:end for
+12:A𝑡←{𝑥:𝑠(𝑥)≠0}
+13:if|A𝑡|>0then
+14:𝑟𝑡←1
+|A𝑡|Í
+𝑥∈A 𝑡log
+1+𝑠(𝑥)·𝑅𝑡+1(𝑥)
+15:else
+16:𝑟𝑡←0
+17:end if
+18:return𝑟𝑡4 Experiments
+In this section, we empirically validate the efficacy of the proposed
+method through a series of experiments.
+4.1 Experimental Setup
+4.1.1 Dataset. We obtain data from the CRSP/Compustat Merged
+(CCM) database via WRDS for the period 1999-2023. Our sample
+comprises all common stocks (CRSP share codes 10 and 11) listed on
+NYSE, AMEX, and NASDAQ exchanges. We compute monthly total
+returns from daily price and volume data, which we then transform
+into momentum features following Han et al. [ 14]. Specifically, we
+construct 24 momentum features for each stock-month observation:
+mom 1=𝑟𝑡−1,
+mom𝑖=𝑡−2Ö
+𝑗=𝑡−𝑖(1+𝑟𝑗)−1,for𝑖∈{2,..., 24},
+where𝑟𝑗denotes the total return in month 𝑗. These features capture
+return dynamics across multiple time horizons. From Compustat,
+we incorporate key accounting variables updated quarterly: to-
+tal assets (ATQ), total liabilities (LTQ), short-term debt (DLCQ),
+long-term debt (DLTTQ), shareholders’ equity (SEQQ), cash and
+equivalents (CHEQ), net sales (SALEQ), net income (NIQ), operating
+income (OIADPQ), pretax income (PIQ), depreciation (DPQ), and
+diluted earnings per share (EPSPXQ). These fundamental indicators
+provide additional information beyond price momentum.
+4.1.2 Backtesting. We conduct a monthly-rebalanced backtesting
+spanning 288 months from December 1999 to December 2023. At the
+end of each month, we follow a systematic procedure: (1) We group
+the entire asset universe into 𝐾clusters using ORCA and each of the
+baseline models. (2) Within each cluster, we compute a momentum
+spread for each asset based on its rank of the prior month’s return
+(mom 1). (3) We take a long position in assets whose spread falls
+below−𝛾·𝜎and a short position in those whose spread exceeds 𝛾·𝜎,
+where𝛾is the threshold parameter and 𝜎is the standard deviation
+of all spreads. For all experiments, we set 𝛾=1.0and𝐾=30. All
+positions in the resulting portfolio are equally weighted, and a 10%
+stop-loss is applied to each individual position.
+4.1.3 Baseline Models. To comprehensively evaluate the cluster-
+ing performance of ORCA, we compare its performance against a
+diverse set of established methodologies. The baseline models are
+categorized into three groups:
+•Traditional Clustering: Representative unsupervised algo-
+rithms based on the geometric distribution of asset features:
+K-Means ,DBSCAN , and Agglomerative Clustering( Agglo ).
+•Generative Model-based Clustering: Two-stage approaches
+that first learn a latent representation of the data, upon which
+a clustering algorithm is subsequently applied. We use a Vari-
+ational Autoencoder ( VAE ) [19], a Generative Adversarial
+Network ( GAN ) [8], and a Graph Autoencoder ( GAE ) [20] to
+extract asset embeddings, and then apply K-Means to these
+embeddings to form the final clusters. This category also
+includes Variational Deep Embedding ( VaDE ) [16], which
+performs latent representation learning and clustering in an
+end-to-end fashion.
+409
+ICAIF ’25, November 15–18, 2025, Singapore, Singapore Kim et al.
+•Contrastive-based Clustering: Finally, we include a Con-
+trastive Clustering ( CC) [22] methodology, which represents
+a state-of-the-art data-driven approach, as a benchmark.
+4.1.4 Evaluation Metrics. The performance of each strategy is as-
+sessed from multiple perspectives, focusing on risk-adjusted returns.
+We measure the portfolio performance using a suite of standard
+financial metrics: Annualized Return ( AR), Annualized Volatility
+(Vol), Maximum Drawdown ( MDD ), and key risk-adjusted mea-
+sures including the Sharpe Ratio ( Sharpe ), Calmar Ratio ( Calmar ),
+and Sortino Ratio ( Sortino ).
+4.1.5 Implementation. All input features are normalized using a
+StandardScaler prior to training. Our model tokenizes the 36
+normalized features into 64 bins, which are then embedded into a
+128-dimensional hidden space. The transformer encoder consists
+of 2 layers with 8 attention heads. We train the model using the
+AdamW [23] optimizer with a learning rate of 0.002 and a batch size of
+1024. For the unified loss function, Ltotal, the weights for the Lclu,𝛼,
+and theLPINN ,𝛽, are both set to 1.0. For data augmentation, we use
+a standard deviation of 0.1 for the Gaussian noise and a 10% masking
+ratio. All experiments were conducted on a single NVIDIA RTX
+3090 GPU with a fixed random seed of 42 for reproducibility. The
+backtest follows a monthly rebalancing schedule, where positions
+are entered at the beginning of each month and liquidated at the
+end.
+4.2 Main Results
+Figure 3: Cumulative returns of trading strategies from 2000
+to 2023.
+As shown in Table 1, the proposed model, ORCA, achieves su-
+perior performance over benchmark clustering methods across
+major metrics, with the exception of volatility. This demonstrates
+the superior ability of our framework to identify genuinely trad-
+able asset clusters. ORCA achieves superior performance across all
+key metrics. With an annualized return of 36.80%, it outperforms
+the strongest baseline, Contrastive Clustering (CC), by 1.6 percent-
+age points. Crucially, this enhanced return comes with reduced
+risk—ORCA exhibits the lowest maximum drawdown at 17.18%,
+demonstrating the stability of our physics-informed clusters. Figure
+3 illustrates the cumulative returns over the entire test period, show-
+ing ORCA’s consistent outperformance. The risk-adjusted metrics
+further validate our approach. ORCA attains the highest SharpeAR Vol MDD Sharpe Sortino Calmar
+K-means 0.3054 0.1063 0.1904 2.5909 3.0118 1.4459
+DBSCAN 0.2010 0.1012 0.1870 1.6893 2.0438 0.9144
+Agglo 0.1462 0.0773 0.1948 1.5027 1.7852 0.5965
+VAE 0.3200 0.1064 0.1785 2.7241 3.1496 1.6244
+GAN 0.2530 0.1049 0.2072 2.1255 2.5197 1.0761
+GAE 0.2321 0.1059 0.1892 1.9077 2.3583 1.0682
+VaDE 0.2697 0.1047 0.2000 2.2901 2.6644 1.1982
+CC 0.3520 0.1165 0.1815 2.7640 3.1568 1.7741
+ORCA 0.3680 0.1176 0.1718 2.8747 3.3411 1.9669
+Table 1: Performance comparison across clustering meth-
+ods. ORCA consistently outperforms all baselines, achieving
+36.80% annualized return with the lowest maximum draw-
+down (17.18%). Traditional clustering methods and market
+benchmarks show substantially inferior performance.
+Figure 4: Temporal Stability of Risk-Adjusted Returns. Violin
+plots comparing the distribution of key performance metrics
+across non-overlapping 5-year periods.
+ratio (2.87), Sortino ratio (3.34), and Calmar ratio (1.97), indicating
+that performance gains stem from improved cluster quality rather
+than increased risk exposure. The elevated Calmar and Sortino
+ratios specifically confirm that our OU process regularization ef-
+fectively identifies clusters with robust mean-reverting properties.
+While traditional clustering methods exhibit low volatility, they fail
+to capture profitable trading opportunities, yielding inferior risk-
+adjusted returns. Even the state-of-the-art deep learning baseline
+(CC) falls short of ORCA’s performance across all metrics. These
+empirical results validate our core hypothesis: incorporating finan-
+cial dynamics through physics-informed regularization produces
+asset groupings that are fundamentally more suitable for trading
+strategies.
+4.3 Robustness Analysis
+To assess the consistency of ORCA’s performance across varying
+market conditions, we partition the test period into non-overlapping
+5-year intervals (2000-2004, 2005-2009, 2010-2014, 2015-2019, 2020-
+2023) and compute risk-adjusted metrics for each sub-period. Figure
+4 presents the distribution of Sharpe, Sortino, and Calmar ratios
+across these intervals. ORCA demonstrates superior performance
+stability, maintaining the highest median values (indicated by hori-
+zontal bars) across all three metrics while exhibiting comparable
+variance to baseline methods. The compact distribution of ORCA’s
+performance metrics indicates robust returns without excessive
+410
+Deep Mean-Reversion: A Physics-Informed Contrastive Approach to Pairs Trading ICAIF ’25, November 15–18, 2025, Singapore, Singapore
+volatility across different market regimes, including the 2008 finan-
+cial crisis and 2020 pandemic periods. Notably, while traditional
+clustering approaches show consistent but mediocre performance,
+and deep learning baselines (CC, VAE) exhibit higher variance,
+ORCA achieves an optimal balance between return magnitude and
+stability. This empirical evidence confirms that physics-informed
+regularization produces clusters with persistent mean-reverting
+properties, enabling consistent strategy performance independent
+of market conditions. The results validate that ORCA’s superior risk-
+adjusted returns are not artifacts of specific market environments
+but reflect fundamental improvements in cluster quality through
+the integration of financial dynamics into the learning objective.
+4.4 Ablation Study
+Model AR Vol MDD Sharpe Sortino Calmar
+ORCA (Full Model) 0.368 0.118 0.172 2.874 3.341 1.966
+– w/oLPINN 0.358 0.116 0.187 2.828 3.243 1.753
+– w/o PLE 0.337 0.112 0.169 2.732 3.257 1.813
+– w/oLins 0.287 0.104 0.180 2.464 2.934 1.414
+Table 2: Ablation Study of ORCA Components
+We conduct a systematic ablation study to assess the contribu-
+tion of each component in ORCA, with results summarized in Table
+2. The analysis confirms that high-quality representation learning is
+foundational to our approach, as removing either the instance-level
+contrastive loss (Lins) or the Piece-wise Linear Encoding (PLE)
+leads to significant performance degradation. Most critically, the
+study highlights the unique role of the physics-informed regular-
+ization (LPINN ). While its removal results in only a modest decline
+in the Sharpe ratio (2.873 to 2.828), it critically increases the Max-
+imum Drawdown from 17.2% to 18.7%—an 8.7% relative increase
+in downside risk. This finding provides strong evidence that the
+primary function of the PINN regularizer is to enhance portfolio
+stability and control for downside risk by enforcing stable mean-
+reverting dynamics within the clusters. The complementary role of
+each component validates our integrated design.
+4.5 Sensitivity Analysis
+Figure 5: Sensitivity analysis of ORCA performance across
+key hyperparameters. Risk-adjusted metrics are evaluated
+while varying (a) the number of encoder layers, (b) the num-
+ber of attention heads, and (c) the PINN weight 𝛽.
+We examine ORCA’s sensitivity to key hyperparameters through
+systematic variation of architectural components and regularizationstrength. Figure 5 presents the impact on risk-adjusted performance
+metrics. The model demonstrates remarkable stability across archi-
+tectural variations. Varying the number of encoder layers from 2 to
+6 yields only marginal changes in Sharpe ratio (2.875 to 2.726), with
+2 layers surprisingly achieving the best performance. This suggests
+that the physics-informed regularization effectively guides learn-
+ing even with minimal architectural depth. Similarly, increasing
+attention heads from 4 to 8 shows negligible impact on all met-
+rics, indicating that the model does not require extensive attention
+mechanisms to capture relevant asset relationships. The PINN reg-
+ularization weight 𝛽exhibits a clear optimal value at 1.0, where
+all three risk-adjusted metrics reach their peak. Underweighting
+(𝛽=0.1) reduces the Sharpe ratio to 2.748 and Calmar ratio to 1.646,
+confirming insufficient physics-based guidance. Conversely, over-
+weighting (𝛽=10.0) slightly degrades performance, suggesting that
+excessive physics constraints can overshadow the data-driven learn-
+ing. The convex relationship validates our choice of unit weighting
+as an effective balance between empirical patterns and theoretical
+priors.
+5 Conclusion
+This study introduces ORCA (Ornstein-Uhlenbeck Reversion and
+Contrastive Arbitrage), a novel approach designed to identify in-
+herently tradable asset groups by integrating financial dynamics di-
+rectly into the learning objective. ORCA leverages physics-informed
+regularization based on the Ornstein-Uhlenbeck process, thus en-
+suring that identified asset clusters exhibit genuine and stable mean-
+reverting properties conducive to statistical arbitrage. Empirical
+validation performed on U.S. equities from 2000 to 2023 demon-
+strates that ORCA consistently outperforms benchmark clustering
+methods, achieving notably superior risk-adjusted returns (Sharpe
+ratio: 2.87) and minimal maximum drawdown (17.18%), highlighting
+the value of incorporating domain-specific insights into represen-
+tation learning.
+The core innovation of ORCA resides in the concurrent optimiza-
+tion of a contrastive learning mechanism and a PINN regularizer
+within a single unified framework. Contrastive learning effectively
+captures complex nonlinear relationships among assets through
+deep representation learning, while the PINN module enforces ad-
+herence to stable mean-reverting dynamics. This integrative strat-
+egy directly addresses a principal challenge of traditional pairs
+trading methodologies—identifying asset clusters characterized by
+robust and actionable mean-reversion properties beyond mere sta-
+tistical similarities.
+Despite these advancements, several limitations warrant future
+investigation. Firstly, the fixed monthly rebalancing strategy poten-
+tially overlooks intramonth trading opportunities, suggesting future
+improvements could incorporate adaptive rebalancing schedules.
+Secondly, the static, threshold-based position selection mechanism
+currently employed is likely suboptimal under changing market
+conditions. Future research could beneficially explore reinforce-
+ment learning techniques to dynamically optimize position entry
+thresholds and portfolio allocations based on prevailing market
+dynamics and cluster stability metrics.
+In conclusion, incorporating domain-specific physical constraints
+significantly enhances the effectiveness and practical applicability
+411
+ICAIF ’25, November 15–18, 2025, Singapore, Singapore Kim et al.
+of clustering-based trading methodologies. The encouraging results
+presented here highlight the broader potential of physics-informed
+machine learning methods in tackling complex quantitative finance
+challenges, providing a compelling direction for future interdisci-
+plinary research.
+Acknowledgments
+This work was supported by the National Research Foundation
+of Korea (NRF) grant funded by the Korea government(MSIT)(RS-
+2025-24803415)
+References
+[1]Andrew Brim. 2020. Deep reinforcement learning pairs trading with a double
+deep Q-network. In 2020 10th Annual Computing and Communication Workshop
+and Conference (CCWC) . IEEE, 0222–0227.
+[2]Ting Chen, Simon Kornblith, Mohammad Norouzi, and Geoffrey Hinton. 2020. A
+simple framework for contrastive learning of visual representations. In Interna-
+tional conference on machine learning . PMLR, 1597–1607.
+[3]Yung-Sung Chuang, Rumen Dangovski, Hongyin Luo, Yang Zhang, Shiyu Chang,
+Marin Soljačić, Shang-Wen Li, Wen-tau Yih, Yoon Kim, and James Glass. 2022.
+DiffCSE: Difference-based contrastive learning for sentence embeddings. arXiv
+preprint arXiv:2204.10298 (2022).
+[4]Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2018. Bert:
+Pre-training of deep bidirectional transformers for language understanding. arXiv
+preprint arXiv:1810.04805 (2018).
+[5]Robert J Elliott, John Van Der Hoek*, and William P Malcolm. 2005. Pairs trading.
+Quantitative Finance 5, 3 (2005), 271–276.
+[6]Tianyu Gao, Xingcheng Yao, and Danqi Chen. 2021. Simcse: Simple contrastive
+learning of sentence embeddings. arXiv preprint arXiv:2104.08821 (2021).
+[7]Federico Gatta, Vincenzo Schiano Di Cola, Fabio Giampaolo, Francesco Piccialli,
+and Salvatore Cuomo. 2023. Meshless methods for American option pricing
+through physics-informed neural networks. Engineering Analysis with Boundary
+Elements 151 (2023), 68–82.
+[8]Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley,
+Sherjil Ozair, Aaron Courville, and Yoshua Bengio. 2020. Generative adversarial
+networks. Commun. ACM 63, 11 (2020), 139–144.
+[9]Yury Gorishniy, Ivan Rubachev, and Artem Babenko. 2022. On embeddings for
+numerical features in tabular deep learning. Advances in Neural Information
+Processing Systems 35 (2022), 24991–25004.
+[10] Jean-Bastien Grill, Florian Strub, Florent Altché, Corentin Tallec, Pierre
+Richemond, Elena Buchatskaya, Carl Doersch, Bernardo Avila Pires, Zhaohan
+Guo, Mohammad Gheshlaghi Azar, et al .2020. Bootstrap your own latent-a new
+approach to self-supervised learning. Advances in neural information processing
+systems 33 (2020), 21271–21284.
+[11] Léo Grinsztajn, Edouard Oyallon, and Gaël Varoquaux. 2022. Why do tree-based
+models still outperform deep learning on typical tabular data? Advances in neural
+information processing systems 35 (2022), 507–520.
+[12] Raia Hadsell, Sumit Chopra, and Yann LeCun. 2006. Dimensionality reduction
+by learning an invariant mapping. In 2006 IEEE computer society conference on
+computer vision and pattern recognition (CVPR’06) , Vol. 2. IEEE, 1735–1742.
+[13] Donatien Hainaut and Alex Casas. 2024. Option pricing in the Heston model
+with physics inspired neural networks. Annals of Finance 20, 3 (2024), 353–376.
+[14] Chulwoo Han, Zhaodong He, and Alenson Jun Wei Toh. 2023. Pairs trading via
+unsupervised learning. European Journal of Operational Research 307, 2 (2023),
+929–947.
+[15] Kaiming He, Haoqi Fan, Yuxin Wu, Saining Xie, and Ross Girshick. 2020. Mo-
+mentum contrast for unsupervised visual representation learning. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern recognition . 9729–9738.
+[16] Zhuxi Jiang, Yin Zheng, Huachun Tan, Bangsheng Tang, and Hanning Zhou.
+2016. Variational deep embedding: An unsupervised and generative approach to
+clustering. arXiv preprint arXiv:1611.05148 (2016).
+[17] Salman Khan, Muzammal Naseer, Munawar Hayat, Syed Waqas Zamir, Fa-
+had Shahbaz Khan, and Mubarak Shah. 2022. Transformers in vision: A survey.
+ACM computing surveys (CSUR) 54, 10s (2022), 1–41.
+[18] Sang-Ho Kim, Deog-Yeong Park, and Ki-Hoon Lee. 2022. Hybrid deep reinforce-
+ment learning for pairs trading. Applied Sciences 12, 3 (2022), 944.
+[19] Diederik P Kingma, Max Welling, et al .2013. Auto-encoding variational bayes.
+[20] Thomas N Kipf and Max Welling. 2016. Variational graph auto-encoders. arXiv
+preprint arXiv:1611.07308 (2016).
+[21] Kyungeun Lee, Ye Seul Sim, Hyeseung Cho, Suhee Yoon, Sanghyu Yoon, and
+Woohyung Lim. 2023. Binning as a Pretext Task: Improving Self-Supervised
+Learning in Tabular Domains. (2023).[22] Yunfan Li, Peng Hu, Zitao Liu, Dezhong Peng, Joey Tianyi Zhou, and Xi Peng.
+2021. Contrastive clustering. In Proceedings of the AAAI conference on artificial
+intelligence , Vol. 35. 8547–8555.
+[23] Ilya Loshchilov and Frank Hutter. 2017. Decoupled weight decay regularization.
+arXiv preprint arXiv:1711.05101 (2017).
+[24] Aaron van den Oord, Yazhe Li, and Oriol Vinyals. 2018. Representation learning
+with contrastive predictive coding. arXiv preprint arXiv:1807.03748 (2018).
+[25] Maziar Raissi, Paris Perdikaris, and George E Karniadakis. 2019. Physics-informed
+neural networks: A deep learning framework for solving forward and inverse
+problems involving nonlinear partial differential equations. Journal of Computa-
+tional physics 378 (2019), 686–707.
+[26] Simão Moraes Sarmento and Nuno Horta. 2020. Enhancing a pairs trading strat-
+egy with the application of machine learning. Expert Systems with Applications
+158 (2020), 113490.
+[27] Ravid Shwartz-Ziv and Amitai Armon. 2022. Tabular data: Deep learning is not
+all you need. Information Fusion 81 (2022), 84–90.
+[28] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all
+you need. Advances in neural information processing systems 30 (2017).
+[29] Tongzhou Wang and Phillip Isola. 2020. Understanding contrastive representation
+learning through alignment and uniformity on the hypersphere. In International
+Conference on Machine Learning . PMLR, 9929–9939.
+[30] Qingsong Wen, Tian Zhou, Chaoli Zhang, Weiqi Chen, Ziqing Ma, Junchi Yan,
+and Liang Sun. 2022. Transformers in time series: A survey. arXiv preprint
+arXiv:2202.07125 (2022).
+[31] Zhizhao Xu and Chao Luo. 2023. Improved pairs trading strategy using two-
+level reinforcement learning framework. Engineering Applications of Artificial
+Intelligence 126 (2023), 107148.
+412

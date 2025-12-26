@@ -221,6 +221,37 @@ def backtest_orca(data_root, model_path, start_year=2000, end_year=2023, gamma=1
     print(f"Win Rate:          {win_rate*100:.2f}%")
     print("="*40)
 
+    # --- Plotting ---
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.figure(figsize=(12, 8))
+
+        # 1. Cumulative Return
+        plt.subplot(2, 1, 1)
+        plt.plot(res_df['date'], res_df['cum_ret'], label='Portfolio')
+        plt.title('Cumulative Return')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+
+        # 2. Drawdown
+        plt.subplot(2, 1, 2)
+        plt.plot(res_df['date'], drawdown, label='Drawdown', color='red')
+        plt.fill_between(res_df['date'], drawdown, 0, color='red', alpha=0.3)
+        plt.title('Drawdown')
+        plt.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig("backtest_plots.png")
+        print("Plots saved to backtest_plots.png")
+        plt.close()
+    except ImportError:
+        print("Matplotlib not installed. Skipping plots.")
+    except Exception as e:
+        print(f"Error plotting: {e}")
+
+    print("="*40)
+
     res_df.to_csv("backtest_results.csv")
     print(f"Detailed results saved to backtest_results.csv")
 

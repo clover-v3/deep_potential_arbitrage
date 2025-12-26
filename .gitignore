@@ -1,8 +1,9 @@
 # Data
-data/
 cached/
 test_data_root/
 test_ghz_data/
+data/processed/
+data/raw_ghz/
 
 # Outputs & Artifacts
 results/

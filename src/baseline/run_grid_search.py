@@ -20,7 +20,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 
 from src.baseline.run_pipeline import run_rolling_pipeline, load_data
 
-def run_single_experiment(params, start_date, end_date, lookback, preloaded_df):
+
+def run_single_experiment(params, start_date, end_date, lookback, preloaded_df,
+                          universe_top_n: float | int | None = 2000,
+                          feature_set: str = "all"):
     """
     Wrapper for parallel execution.
     """
@@ -36,6 +39,8 @@ def run_single_experiment(params, start_date, end_date, lookback, preloaded_df):
                 start_date, end_date, lookback,
                 method='kmeans', n_clusters=params['value'],
                 outlier_percentile=95.0,
+                feature_set=feature_set,
+                universe_top_n=universe_top_n,
                 output_subdir=subdir, return_metrics=True,
                 preloaded_df=preloaded_df,
                 preprocessed_data=True
@@ -48,6 +53,8 @@ def run_single_experiment(params, start_date, end_date, lookback, preloaded_df):
                 method='agglomerative',
                 dist_quantile=params['value'],
                 outlier_percentile=95.0,
+                feature_set=feature_set,
+                universe_top_n=universe_top_n,
                 output_subdir=subdir, return_metrics=True,
                 preloaded_df=preloaded_df,
                 preprocessed_data=True
@@ -60,6 +67,8 @@ def run_single_experiment(params, start_date, end_date, lookback, preloaded_df):
                 method='dbscan',
                 dist_quantile=params['value'],
                 outlier_percentile=95.0,
+                feature_set=feature_set,
+                universe_top_n=universe_top_n,
                 output_subdir=subdir, return_metrics=True,
                 preloaded_df=preloaded_df,
                 preprocessed_data=True
@@ -76,7 +85,11 @@ def run_single_experiment(params, start_date, end_date, lookback, preloaded_df):
 
     return None
 
-def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir, split_ratio=0.8):
+
+def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir,
+                  split_ratio: float = 0.8,
+                  universe_top_n: float | int | None = 2000,
+                  feature_set: str = "all"):
 
     # 1. Determine Splits
     full_range = pd.to_datetime([start_date, end_date])
@@ -119,10 +132,11 @@ def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir, split_ra
         return
 
     print(f"Data Loaded: {len(full_df)} rows.")
+    print(f"Universe Top-N: {universe_top_n} (None/NaN means all names)")
+    print(f"Feature Set: {feature_set}")
 
     # --- PHASE 1: GRID SEARCH (VALIDATION) ---
     print(f"\n>>> Starting PHASE 1: Grid Search on Validation Set ({val_start} - {val_end})")
-
     # Optimize: Prepare Validation Data ONCE
     # 1. Slice
     val_start_dt = pd.to_datetime(val_start)
@@ -138,7 +152,6 @@ def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir, split_ra
     val_df['year_month'] = val_df['date'].dt.to_period('M')
 
     print(f"Validation Data Prepared: {len(val_df)} rows (Reduced from {len(full_df)})")
-
     # Grids
     k_grid = [10, 50, 100, 200, 300, 500, 1000]
     q_grid = [0.05, 0.1, 0.2, 0.3, 0.5, 0.8]
@@ -151,13 +164,13 @@ def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir, split_ra
     for q in q_grid:
         tasks.append({'method': 'dbscan', 'value': q, 'subdir': f"val_dbscan_q_{q}"})
 
-    n_jobs = max(20, multiprocessing.cpu_count() - 1)
+    n_jobs = min(50, multiprocessing.cpu_count() - 1)
     print(f"Running {len(tasks)} experiments with {n_jobs} cores...")
 
-    # Pass 'val_df' instead of 'full_df'
-    # And use wrapper that sets preprocessed_data=True
     results = Parallel(n_jobs=n_jobs)(
-        delayed(run_single_experiment)(task, val_start, val_end, lookback, val_df)
+        delayed(run_single_experiment)(task, val_start, val_end, lookback, val_df,
+                                       universe_top_n=universe_top_n,
+                                       feature_set=feature_set)
         for task in tasks
     )
 
@@ -169,17 +182,21 @@ def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir, split_ra
 
     df_res = pd.DataFrame(results)
     os.makedirs(output_dir, exist_ok=True)
-    df_res.to_csv(os.path.join(output_dir, "validation_grid_search.csv"), index=False)
+    df_res.to_csv(os.path.join(output_dir, f"validation_grid_search_{start_date}_{val_end}.csv"), index=False)
 
     print("\n>>> Validation Results:")
     cols = ['Method', 'Param', 'Value', 'sharpe', 'total_return', 'max_drawdown']
     print(df_res[[c for c in cols if c in df_res.columns]].to_markdown(index=False))
 
-    # Select Best PER METHOD
+    # Select Best
+    best_row = df_res.loc[df_res['sharpe'].idxmax()]
+    best_method = best_row['Method']
+    best_val = best_row['Value']
+    print(f"\n*** BEST MODEL: {best_method} with Value={best_val} (Sharpe: {best_row['sharpe']:.4f}) ***")
+
+    # --- PHASE 2: FINAL TEST (TEST SET) ---
+    print(f"\n>>> Starting PHASE 2: Run Best Model on Test Set ({test_start} - {test_end})")
     methods = df_res['Method'].unique()
-
-    print(f"\n>>> Starting PHASE 2: Run Best Model PER METHOD on Test Set ({test_start} - {test_end})")
-
     for m in methods:
         df_m = df_res[df_res['Method'] == m]
         if df_m.empty: continue
@@ -213,23 +230,48 @@ def run_auto_tune(start_date, end_date, lookback, data_dir, output_dir, split_ra
             n_clusters=n_clusters,
             dist_quantile=dist_quantile,
             outlier_percentile=95.0,
+            feature_set=feature_set,
+            universe_top_n=universe_top_n,
             output_subdir=final_subdir,
-            preloaded_df=full_df, # Use cached data
+            preloaded_df=full_df,  # Use cached data
             data_dir=data_dir
         )
         print(f"-> Saved to results/baseline/{final_subdir}")
 
-    print("\nDone. All Best Models executed on Test Set.")
+    # print("\nDone. All Best Models executed on Test Set.")
+
+    # print(f"\nDone. Final Test Results in results/baseline/{final_subdir}/rolling_pnl_{test_start}_{test_end}.csv")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--start_date', type=str, default='1980-01-01')
     parser.add_argument('--end_date', type=str, default='2024-12-31')
     parser.add_argument('--lookback', type=int, default=12)
-    parser.add_argument('--split_ratio', type=float, default=0.8, help="Ratio for Validation Split (In-Sample)")
+    parser.add_argument('--split_ratio', type=float, default=0.8,
+                        help="Ratio for Validation Split (In-Sample)")
     parser.add_argument('--data_dir', type=str, default="data/processed/merged_factors")
     parser.add_argument('--output_dir', type=str, default="results/baseline/autotune")
+    parser.add_argument('--universe_top_n', type=float, default=2000,
+                        help="Top-N stocks by market cap (prc*shrout or prc*vol). "
+                             "Use 0 or NaN to keep full universe.")
+    parser.add_argument('--feature_set', type=str, default="all",
+                        choices=['all', 'price_only'],
+                        help="Feature set to use in clustering pipeline.")
 
     args = parser.parse_args()
 
-    run_auto_tune(args.start_date, args.end_date, args.lookback, args.data_dir, args.output_dir, args.split_ratio)
+    # Interpret universe_top_n: 0 or NaN -> full universe
+    uni_n = args.universe_top_n
+    if uni_n == 0 or (isinstance(uni_n, float) and np.isnan(uni_n)):
+        uni_n = None
+
+    run_auto_tune(
+        args.start_date,
+        args.end_date,
+        args.lookback,
+        args.data_dir,
+        args.output_dir,
+        args.split_ratio,
+        universe_top_n=uni_n,
+        feature_set=args.feature_set,
+    )

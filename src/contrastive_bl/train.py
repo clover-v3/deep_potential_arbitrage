@@ -26,6 +26,51 @@ def augment(x, mask_prob=0.1, noise_std=0.1):
 
     return x_aug
 
+from torch.utils.data import Sampler
+
+class MonthlyBatchSampler(Sampler):
+    """
+    Samples batches ensuring all samples in a batch belong to the same month (or date).
+    Shuffles:
+    - Order of months
+    - Tickers within each month
+    """
+    def __init__(self, dates, batch_size):
+        self.dates = dates
+        self.batch_size = batch_size
+
+        # Group indices by date
+        # dates is expected to be a numpy array or list aligned with dataset
+        self.date_to_indices = {}
+        for idx, date in enumerate(dates):
+            if date not in self.date_to_indices:
+                self.date_to_indices[date] = []
+            self.date_to_indices[date].append(idx)
+
+        self.unique_dates = list(self.date_to_indices.keys())
+
+    def __iter__(self):
+        # 1. Shuffle months
+        np.random.shuffle(self.unique_dates)
+
+        for date in self.unique_dates:
+            indices = np.array(self.date_to_indices[date])
+            # 2. Shuffle tickers within month
+            np.random.shuffle(indices)
+
+            # 3. Yield batches
+            # If month has > batch_size elements, chunk it
+            # If < batch_size, yield one smaller batch (or drop? standard is yield)
+            for i in range(0, len(indices), self.batch_size):
+                yield indices[i:i+self.batch_size]
+
+    def __len__(self):
+        # Approximation: sum of batches per month
+        count = 0
+        for indices in self.date_to_indices.values():
+            count += (len(indices) + self.batch_size - 1) // self.batch_size
+        return count
+
 def train_orca(
     data_root,
     epochs=100,
@@ -37,7 +82,11 @@ def train_orca(
     device = None,
     start_year=2000,
     end_year=2023,
-    smoke_test=False
+    smoke_test=False,
+    batch_mode='global',
+    d_model=128,
+    n_bins=64,
+    dropout=0.1
 ):
     # Auto-detect device if not specified
     if device is None:
@@ -48,11 +97,11 @@ def train_orca(
         else:
             device = 'cpu'
 
-    print(f"Training ORCA on {device}...")
+    print(f"Training ORCA on {device} (Batch Mode: {batch_mode}, d_model={d_model})...")
 
     # 1. Load Data
     loader = ORCADataLoader(data_root)
-    # Load recent data for training (e.g., 2000-2023)
+    # Load recent data for training
     print(f"Loading and building features ({start_year}-{end_year})...")
     loader.load_data(start_year, end_year)
     df = loader.build_orca_features()
@@ -64,34 +113,61 @@ def train_orca(
     print(f"Data Loaded: {df.shape}")
 
     # 2. Preprocess
-    # Features: All columns except keys
-    # Keys: permno, date (index or columns)
-    # Check columns.
     # Exclude IDs and metadata
     exclude_cols = ['permno', 'date', 'gvkey', 'cusip', 'valid_from',
                     'datadate', 'cusip6', 'ncusip6', 'namedt', 'nameendt']
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     print(f"Using {len(feature_cols)} features: {feature_cols}")
 
-    # Sort by Date for Time-Series Split
+    # Universe Selection (Top 2000 by Market Cap at Last Date)
+    if 'mve_m' in df.columns and 'date' in df.columns:
+        last_date = df['date'].max()
+        print(f"Selecting Universe based on Market Cap at {last_date}...")
+
+        # Get data for last month
+        last_month_df = df[df['date'] == last_date]
+
+        # Sort by MVE and take top 2000
+        # Check if mve_m is valid
+        if not last_month_df.empty:
+            top_2000 = last_month_df.sort_values('mve_m', ascending=False).head(2000)
+            universe_permnos = top_2000['permno'].unique()
+            print(f"Universe selected: {len(universe_permnos)} stocks.")
+
+            # Filter Training Data to this Universe
+            df = df[df['permno'].isin(universe_permnos)].copy()
+
+            # Save Universe
+            uni_save_path = save_path.replace('.pth', '_universe.npy')
+            np.save(uni_save_path, universe_permnos)
+            print(f"Saved universe to {uni_save_path}")
+        else:
+             print("Warning: Last month data empty, skipping universe selection.")
+    else:
+        print("Warning: 'mve_m' or 'date' missing. Skipping universe selection.")
+
+    # Sort by Date for Time-Series Split (and Monthly Sampler)
     if 'date' in df.columns:
         df = df.sort_values(['date', 'permno'])
 
-    # Robust conversion: Handle pd.NA / Object types / Coercion
+    # Store Dates for Sampler
+    dates_array = df['date'].values if 'date' in df.columns else np.zeros(len(df))
+
+    # Robust conversion
     features = df[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
 
-    # Normalize (StandardScaler) - Critical for PLE
+    # Normalize (StandardScaler) + Winsorize (Clip at 5 std)
     mean = features.mean(axis=0)
     std = features.std(axis=0) + 1e-6
     features = (features - mean) / std
 
+    # Winsorize: Clip at +/- 5
+    features = np.clip(features, -5, 5)
+
     # Returns for PINN
-    # We need r_t and r_{t-1}.
-    # Let's add a raw 'ret' column to use for PINN if available in DF.
     if 'ret' in df.columns:
         ret_series = pd.to_numeric(df['ret'], errors='coerce').fillna(0).values.astype(np.float32)
     else:
-        # Fallback to mom_1
         print("Warning: 'ret' column missing. Using mom_1 as proxy.")
         idx_mom1 = feature_cols.index('mom_1') if 'mom_1' in feature_cols else 0
         ret_series = features[:, idx_mom1]
@@ -100,7 +176,7 @@ def train_orca(
     r_prev = np.roll(ret_series, 1)
     r_prev[0] = 0
 
-    # Stack returns for loader: (N, 2)
+    # Stack returns for loader
     returns_tensor = np.stack([ret_series, r_prev], axis=1)
 
     # 3. Validation Split (Time Series)
@@ -118,11 +194,26 @@ def train_orca(
     X_val = torch.tensor(features[val_idx])
     R_val = torch.tensor(returns_tensor[val_idx])
 
-    train_loader = DataLoader(TensorDataset(X_train, R_train), batch_size=batch_size, shuffle=True)
+    # Sampler Logic
+    if batch_mode == 'monthly':
+        # Pass dates corresponding to TRAIN indices
+        train_dates = dates_array[train_idx]
+        train_sampler = MonthlyBatchSampler(train_dates, batch_size=batch_size)
+        train_loader = DataLoader(TensorDataset(X_train, R_train), batch_sampler=train_sampler)
+    else:
+        # Global Shuffle
+        train_loader = DataLoader(TensorDataset(X_train, R_train), batch_size=batch_size, shuffle=True)
+
     val_loader = DataLoader(TensorDataset(X_val, R_val), batch_size=batch_size, shuffle=False)
 
     # 4. Model & Optimizer
-    model = ORCAModel(n_features=len(feature_cols), n_clusters=30).to(device)
+    model = ORCAModel(
+        n_features=len(feature_cols),
+        n_clusters=30,
+        d_model=d_model,
+        n_bins=n_bins,
+        dropout=dropout
+    ).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr)
 
     # 5. Training Loop
@@ -197,8 +288,28 @@ if __name__ == "__main__":
     parser.add_argument("--end_year", type=int, default=2023)
     parser.add_argument("--smoke_test", action="store_true", help="Run fast smoke test")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/mps/cpu)")
+    parser.add_argument("--batch_mode", type=str, default="global", help="global/monthly")
+    parser.add_argument("--save_path", type=str, default="orca_model.pth", help="Path to save model")
+
+    # Hyperparams
+    parser.add_argument("--d_model", type=int, default=128)
+    parser.add_argument("--n_bins", type=int, default=64)
+    parser.add_argument("--dropout", type=float, default=0.1)
+
     args = parser.parse_args()
 
-    train_orca(args.data_root, args.epochs, args.batch_size,
-               start_year=args.start_year, end_year=args.end_year,
-               smoke_test=args.smoke_test, device=args.device)
+    train_orca(
+        data_root=args.data_root,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=0.002,
+        save_path=args.save_path,
+        device=args.device,
+        start_year=args.start_year,
+        end_year=args.end_year,
+        smoke_test=args.smoke_test,
+        batch_mode=args.batch_mode,
+        d_model=args.d_model,
+        n_bins=args.n_bins,
+        dropout=args.dropout
+    )

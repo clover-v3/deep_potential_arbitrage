@@ -1,13 +1,34 @@
+import torch
+import torch.nn.functional as F
 import pandas as pd
 import numpy as np
-import torch
 import argparse
+import os
+import matplotlib.pyplot as plt
 from tqdm import tqdm
+
 from src.contrastive_bl.data_loader import ORCADataLoader
 from src.contrastive_bl.orca import ORCAModel
+from src.baseline.strategy import BaselineStrategy
 
-def backtest_orca(data_root, model_path, start_year=2000, end_year=2023, gamma=1.0, device=None):
-    # Auto-detect device if not specified
+def load_universe(model_path):
+    """Load Saved Universe (.npy) if available"""
+    uni_path = model_path.replace('.pth', '_universe.npy')
+    if os.path.exists(uni_path):
+        print(f"Loading Universe from {uni_path}")
+        return np.load(uni_path, allow_pickle=True)
+    else:
+        print("Warning: Universe file not found. Trading all stocks.")
+        return None
+
+def backtest_orca(
+    data_root,
+    model_path='orca_model.pth',
+    start_year=2021,
+    end_year=2021,
+    device=None
+):
+    # Auto-detect device
     if device is None:
         if torch.cuda.is_available():
             device = 'cuda'
@@ -18,250 +39,213 @@ def backtest_orca(data_root, model_path, start_year=2000, end_year=2023, gamma=1
 
     print(f"Running Backtest on {device}...")
 
-    # 1. Load Data
+    # 1. Load Data (Monthly) for Clustering
+    # We still use monthly features to determine the clusters
     loader = ORCADataLoader(data_root)
-    # Load all data for backtest
+    print(f"Loading monthly data for years {start_year-1} to {end_year}...")
     loader.load_data(start_year, end_year)
-    df = loader.build_orca_features()
+    df_monthly = loader.build_orca_features()
 
-    if df.empty:
-        print("No data.")
+    # 2. Filter by Universe (if trained on subset)
+    universe = load_universe(model_path)
+    if universe is not None:
+        print(f"Filtering Backtest Universe: {len(universe)} stocks")
+        df_monthly = df_monthly[df_monthly['permno'].isin(universe)].copy()
+
+    if df_monthly.empty:
+        print("Error: No data for backtest.")
         return
 
-    # 2. Load Model
-    # Determine features from data
-    # Exclude IDs and metadata (Must match train.py)
+    # 3. Load Model
+    # Need to infer n_features from data cols
     exclude_cols = ['permno', 'date', 'gvkey', 'cusip', 'valid_from',
                     'datadate', 'cusip6', 'ncusip6', 'namedt', 'nameendt']
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
-    n_features = len(feature_cols)
-    print(f"Features: {n_features}")
+    feature_cols = [c for c in df_monthly.columns if c not in exclude_cols]
 
-    model = ORCAModel(n_features=n_features, n_clusters=30).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    print(f"Features: {len(feature_cols)}")
+
+    model = ORCAModel(n_features=len(feature_cols), n_clusters=30).to(device)
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+    except FileNotFoundError:
+        print(f"Error: Model file {model_path} not found.")
+        return
+
     model.eval()
 
-    # 3. Predict Clusters (Rolling / Monthly)
-    # We iterate by month to simulate 'rebalancing'
-    # Actually, we can pre-calculate clusters for all rows if model is static.
-    # The paper implies using the trained model to assign clusters.
+    # 4. Predict Clusters (Monthly)
+    print("Predicting Monthly Clusters...")
+    # Preprocess same as train
+    if 'date' in df_monthly.columns:
+        df_monthly = df_monthly.sort_values(['date', 'permno'])
 
-    # Prepare Tensor
-    # Normalize with same stats as training?
-    # Ideal: fit scaler on training period. Here we use global stats for simplicity/demo.
-    # Robust conversion
-    X_raw = df[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
-     # X_raw = np.nan_to_num(X_raw) # Already handled by fillna(0)
-    mean = X_raw.mean(axis=0)
-    std = X_raw.std(axis=0) + 1e-6
-    X_norm = (X_raw - mean) / std
+    features = df_monthly[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+    # Standardize & Winsorize (Using statistics from BACKTEST data? Or should use Train stats?
+    # Ideally Train stats. For simplicity/baseline, we re-standardize per batch or globally.
+    # Here implementing same logic as new train.py: Global standardization of loaded data + Clip.
+    mean = features.mean(axis=0)
+    std = features.std(axis=0) + 1e-6
+    features = (features - mean) / std
+    features = np.clip(features, -5, 5) # Winsorize
 
-    # Inference in batches
+    X = torch.tensor(features).to(device)
+
     batch_size = 4096
-    all_clusters = []
+    clusters = []
 
-    print("Predicting Clusters...")
     with torch.no_grad():
-        for i in range(0, len(X_norm), batch_size):
-            batch = torch.tensor(X_norm[i:i+batch_size]).to(device)
-            # Forward through backbone -> cluster head
-            h = model.backbone(batch)
-            probs = model.cluster_head(h)
-            clusters = torch.argmax(probs, dim=1).cpu().numpy()
-            all_clusters.append(clusters)
+        for i in range(0, len(X), batch_size):
+            x_batch = X[i:i+batch_size]
+            h = model(x_batch) # Forward returns h (Backbone features)
+            c_logits = model.get_cluster_prob(h) # Returns probabilities/logits
+            c_ids = torch.argmax(c_logits, dim=1).cpu().numpy()
+            clusters.append(c_ids)
 
-    df['cluster'] = np.concatenate(all_clusters)
+    df_monthly['cluster_label'] = np.concatenate(clusters)
 
-    # 4. Strategy Execution
-    # Monthly Rebalance
-    # Group by Date, then Cluster.
+    # Create Mapping: (Date, Permno) -> Cluster
+    # Date in monthly df is Month-End.
+    # We will forward-fill this to daily data.
+    # Ensure date is datetime
+    df_monthly['date'] = pd.to_datetime(df_monthly['date'])
 
-    df['date'] = pd.to_datetime(df['date'])
-    dates = sorted(df['date'].unique())
+    # Keep only relevant columns for merging
+    cluster_map = df_monthly[['date', 'permno', 'cluster_label']].copy()
 
-    portfolio_returns = []
+    # 5. Load Daily Data for Trading
+    # Since we don't have perfect daily data loader integrated yet, we construct it from
+    # whatever 'dsf' files are available or fallback to monthly 'msf' if daily undefined.
+    # User Requirement: "Read daily data... use BaselineStrategy"
 
-    print("Running Backtest...")
-    for t in tqdm(dates):
-        # Current Month Data
-        period_df = df[df['date'] == t].copy()
+    # Try loading Daily DSF
+    # Assuming standard parquet structure `crsp_dsf/dsf_YYYY.parquet`
+    # Load Daily Data with Buffer
+    print("Loading Daily Price Data with Buffer...")
+    daily_dfs = []
+    dsf_path = os.path.join(data_root, 'crsp_dsf')
+    msf_fallback = False
 
-        # We need Next Month Return for PnL
-        # In this DF, 'ret' is valid for month t (the one ending at date t).
-        # We trade at end of t, hold for t+1.
-        # So we need outcome: ret_{t+1}.
-        # Simple way: shift the 'ret' column in the full df?
-        # Or look ahead.
+    # Load prev year for buffer
+    years_to_load = [start_year - 1, start_year] if start_year == end_year else range(start_year - 1, end_year + 1)
 
-        # Let's pivot returns to get lookahead easily.
-        pass # Too slow inside loop.
+    if os.path.exists(dsf_path):
+        for y in years_to_load:
+            fpath = os.path.join(dsf_path, f"dsf_{y}.parquet")
+            if os.path.exists(fpath):
+                daily_dfs.append(pd.read_parquet(fpath))
 
-    # Vectorized Lookahead
-    # Sort by permno, date
-    df = df.sort_values(['permno', 'date'])
-    df['next_ret'] = df.groupby('permno')['ret'].shift(-1)
+    if not daily_dfs:
+        print("Warning: No Daily Data (crsp_dsf) found. Falling back to Monthly (MSF) as daily proxy.")
+        # This basically runs the monthly strategy but passed through the daily engine logic
+        # Re-use df_monthly but ensure returns are correct
+        daily_df = df_monthly[['date', 'permno', 'ret']].copy()
+        # Rename 'date' -> 'date' is fine
+        msf_fallback = True
+    else:
+        daily_df = pd.concat(daily_dfs, ignore_index=True)
 
-    # Drop rows where next_ret is missing (e.g. last month)
-    df = df.dropna(subset=['next_ret'])
+    # Ensure Filter by Universe
+    if universe is not None:
+        daily_df = daily_df[daily_df['permno'].isin(universe)].copy()
 
-    # Re-loop
-    total_pnl = 0
-    daily_returns = [] # actually monthly
+    daily_df['date'] = pd.to_datetime(daily_df['date'])
+    daily_df = daily_df.sort_values(['permno', 'date'])
 
-    for t in tqdm(dates):
-        # At time t, we observe 'mom_1' (ret_t), 'cluster', etc.
-        # We form portfolio.
-        # Outcome is 'next_ret'.
+    # Determine Test Start Date for Slicing later
+    test_start_date = pd.Timestamp(f"{start_year}-01-01")
 
-        period_df = df[df['date'] == t]
+    # 6. Merge Clusters into Daily Data
+    # Merge AsOf or Forward Fill?
+    # Cluster is determined at Month T-1 (or T). Strategy trades in Month T+1?
+    # Usually: Features from Month T (End) -> Cluster for Month T+1.
+    # Let's align:
+    # cluster_map dates are Month Ends.
+    # If using 'resampled' daily, simply FFILL.
 
-        # Iterate Clusters
-        longs = []
-        shorts = []
+    # Pivot Daily to have a continuous date index per permno
+    # Actually `pd.merge_asof` is best for "Last known cluster".
 
-        for k, cluster_df in period_df.groupby('cluster'):
-            if len(cluster_df) < 5: continue # Skip tiny clusters
+    daily_df = daily_df.sort_values('date')
+    cluster_map = cluster_map.sort_values('date')
 
-            # Ranking within cluster by mom_1 (Prior 1-month return)
-            # "Sort assets ... by prior one-month return ... to identify top/bottom"
-            # mom_1 is ret_{t-1}?
-            # In loader: mom_1 = shift(1) ret. So it is ret_{t-1}. Correct.
+    merged = pd.merge_asof(
+        daily_df,
+        cluster_map,
+        on='date',
+        by='permno',
+        direction='backward' # daily date >= cluster date. Cluster determined at prev month end.
+    )
 
-            # Compute Momentum Spread
-            # "The return differential ... defines a momentum spread"
-            # Wrapper: Standardize rank?
-            # "based on its rank ... diff between top and bottom"
-            # Actually Algorithm 1 says:
-            # 2: Momentum Spread: ... based on its rank of R_{t-1}.
-            # 6: if Spread < -gamma * sigma ...
+    # Drop rows where cluster is NaN (before first month)
+    merged = merged.dropna(subset=['cluster_label'])
 
-            # Interpretation: Spread(x) = Rank(x) centered?
-            # Or Spread(x) = R_{t-1}(x) - ClusterMean(R_{t-1})?
-            # Ranking usually implies Uniformity.
-            # Let's assuming Z-score of R_{t-1} within cluster?
-            # Paper says "based on its rank ...".
-            # Let's use Z-score of return.
+    # Rename for Strategy
+    # Strategy needs: date, permno, ret (daily return)
+    # Check if 'ret' in daily
+    if 'ret' not in merged.columns and 'retx' in merged.columns:
+         merged['ret'] = merged['retx'] # Fallback
 
-            vals = cluster_df['mom_1'].values
-            mu = vals.mean()
-            sig = vals.std() + 1e-8
-            z_score = (vals - mu) / sig
+    # 7. Run Baseline Strategy
+    print("Running Baseline Strategy (Daily)...")
+    strategy = BaselineStrategy(
+        entry_z=2.0,
+        exit_z=0.0,
+        window=20, # Daily Window for Idio Return? Z-score window.
+        signal_method='threshold',
+        stop_entry_last_n=5 # Use class logic
+    )
 
-            # Signals
-            # Long Losers (Mean Reversion) -> Spread < -gamma
-            # Short Winners -> Spread > gamma
+    res = strategy.generate_signals(merged)
 
-            # If mom_1 is high (Winner), spread is high. -> Short.
-            # If mom_1 is low (Loser), spread is low. -> Long.
+    # Extract Daily Returns
+    daily_ret = res['daily_ret'] # Series
 
-            long_mask = z_score < -gamma
-            short_mask = z_score > gamma
+    # Slice to Test Period ONLY (Remove Buffer)
+    final_port_ret = daily_ret[daily_ret.index >= test_start_date]
+    if end_year:
+        test_end_date = pd.Timestamp(f"{end_year}-12-31")
+        final_port_ret = final_port_ret[final_port_ret.index <= test_end_date]
 
-            longs.extend(cluster_df[long_mask]['next_ret'].values)
-            shorts.extend(cluster_df[short_mask]['next_ret'].values) # Short -> -1 * ret
+    print(f"Backtest Period: {final_port_ret.index.min()} to {final_port_ret.index.max()}")
 
-        # Portfolio Return (Equal Weighted)
-        pnl = 0
-        count = len(longs) + len(shorts)
+    # 8. Metrics & Plotting
 
-        if count > 0:
-            # Long: sum(ret)
-            # Short: sum(-ret)
-            r_long = np.sum(longs)
-            r_short = np.sum(shorts) * -1
+    # 8. Metrics & Plotting
+    metrics = strategy.get_summary_metrics(final_port_ret)
 
-            # Avg return
-            avg_ret = (r_long + r_short) / count
-            portfolio_returns.append({'date': t, 'ret': avg_ret, 'positions': count})
-        else:
-            portfolio_returns.append({'date': t, 'ret': 0.0, 'positions': 0})
-
-    res_df = pd.DataFrame(portfolio_returns)
-    res_df['cum_ret'] = (1 + res_df['ret']).cumprod()
-
-    # --- Metrics Logic ---
     print("\n" + "="*40)
     print("       BACKTEST PERFORMANCE SUMMARY       ")
     print("="*40)
-
-    # 1. Total Cumulative Return
-    if not res_df.empty:
-        total_ret = res_df['cum_ret'].iloc[-1] - 1
-    else:
-        total_ret = 0.0
-
-    # 2. Annualized Return & Vol
-    # Assuming monthly rebalancing (12 periods/year)
-    ann_ret = res_df['ret'].mean() * 12
-    ann_vol = res_df['ret'].std() * np.sqrt(12) + 1e-9
-
-    # 3. Sharpe Ratio
-    sharpe = ann_ret / ann_vol
-
-    # 4. Max Drawdown
-    cum_series = res_df['cum_ret']
-    running_max = cum_series.cummax()
-    drawdown = (cum_series - running_max) / running_max
-    max_dd = drawdown.min()
-
-    # 5. Calmar Ratio (Ann Return / Abs Max DD)
-    calmar = ann_ret / abs(max_dd) if max_dd != 0 else 0.0
-
-    # 6. Win Rate (Months with > 0 return)
-    win_months = (res_df['ret'] > 0).sum()
-    total_months = len(res_df)
-    win_rate = win_months / total_months if total_months > 0 else 0.0
-
-    print(f"Total Return:      {total_ret*100:.2f}%")
-    print(f"Annualized Return: {ann_ret*100:.2f}%")
-    print(f"Annualized Vol:    {ann_vol*100:.2f}%")
-    print(f"Sharpe Ratio:      {sharpe:.4f}")
-    print(f"Max Drawdown:      {max_dd*100:.2f}%")
-    print(f"Calmar Ratio:      {calmar:.4f}")
-    print(f"Win Rate:          {win_rate*100:.2f}%")
+    print(f"Total Return:      {metrics['total_return']*100:.2f}%")
+    print(f"Annualized Return: {metrics['annualized_return']*100:.2f}%")
+    print(f"Sharpe Ratio:      {metrics['sharpe']:.4f}")
+    print(f"Max Drawdown:      {metrics['max_drawdown']*100:.2f}%")
     print("="*40)
 
-    # --- Plotting ---
-    try:
-        import matplotlib.pyplot as plt
+    # Save Results
+    df_res = pd.DataFrame({
+        'date': final_port_ret.index,
+        'ret': final_port_ret.values
+    })
+    df_res.to_csv("backtest_results.csv", index=False)
+    print("Detailed results saved to backtest_results.csv")
 
-        plt.figure(figsize=(12, 8))
-
-        # 1. Cumulative Return
-        plt.subplot(2, 1, 1)
-        plt.plot(res_df['date'], res_df['cum_ret'], label='Portfolio')
-        plt.title('Cumulative Return')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-
-        # 2. Drawdown
-        plt.subplot(2, 1, 2)
-        plt.plot(res_df['date'], drawdown, label='Drawdown', color='red')
-        plt.fill_between(res_df['date'], drawdown, 0, color='red', alpha=0.3)
-        plt.title('Drawdown')
-        plt.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig("backtest_plots.png")
-        print("Plots saved to backtest_plots.png")
-        plt.close()
-    except ImportError:
-        print("Matplotlib not installed. Skipping plots.")
-    except Exception as e:
-        print(f"Error plotting: {e}")
-
-    print("="*40)
-
-    res_df.to_csv("backtest_results.csv")
-    print(f"Detailed results saved to backtest_results.csv")
+    # Plot
+    plt.figure(figsize=(10, 6))
+    (1 + final_port_ret).cumprod().plot()
+    plt.title(f"Cumulative Return (Sharpe: {metrics['sharpe']:.2f})")
+    plt.grid(True, alpha=0.3)
+    plt.savefig("backtest_plots.png")
+    print("Plots saved to backtest_plots.png")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default="./data/raw_ghz")
     parser.add_argument("--model_path", type=str, default="orca_model.pth")
-    parser.add_argument("--start_year", type=int, default=2000)
-    parser.add_argument("--end_year", type=int, default=2023)
-    parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/mps/cpu)")
+    parser.add_argument("--start_year", type=int, default=2021)
+    parser.add_argument("--end_year", type=int, default=2021)
+    parser.add_argument("--device", type=str, default=None)
+
     args = parser.parse_args()
 
     backtest_orca(args.data_root, args.model_path, start_year=args.start_year, end_year=args.end_year, device=args.device)

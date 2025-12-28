@@ -8,98 +8,81 @@ This directory (`src/contrastive_bl/`) contains the implementation of the paper 
 ```
 src/
 ├── contrastive_bl/
-│   ├── data_loader.py   # ORCADataLoader: Features (Momentum + Fundamentals)
-│   ├── modules.py       # Neural Modules: PLE Encoder, Transformer Backbone
-│   ├── orca.py          # ORCAModel: Combined Architecture + Unified Loss
-│   ├── train.py         # Training Loop with Augmentation
-│   ├── backtest.py      # Momentum Spread Strategy Backtest
+│   ├── data_loader.py       # ORCADataLoader: Features (Momentum + Fundamentals)
+│   ├── modules.py           # Neural Modules: PLE Encoder, Transformer Backbone
+│   ├── orca.py              # ORCAModel: Combined Architecture + Unified Loss
+│   ├── train.py             # Training Loop (Augmentation, Universe Selection)
+│   ├── backtest.py          # Daily Trading Backtest (BaselineStrategy)
+│   ├── run_rolling.py       # Rolling Window Experiment Orchestrator
+│   ├── run_autotune_orca.py # Hyperparameter Grid Search Script
 ├── utils/
-│   ├── data_utils.py    # Shared data helpers (safe_log, clean_infs, etc.)
+│   ├── data_utils.py        # Shared data helpers (safe_log, clean_infs, etc.)
 ```
 
-## Data Specification
+## 1. Data Pipeline & Processing
 
-The ORCA model uses a strictly defined set of **36 features** for each asset at each time step $t$.
+### Features (36 Total)
+*   **Momentum (24)**: `mom_1` (Last month return) + `mom_i` (Cumulative return $t-i \dots t-1$).
+*   **Fundamentals (12)**: Quarterly metrics (Asset, Debt, Income, etc.) aligned to monthly price data.
 
-### 1. Momentum Features (24)
-**Source**: Calculated in `data_loader.py` from raw CRSP `msf` returns.
-*   `mom_1`: Return in month $t-1$.
-*   `mom_2` ... `mom_24`: Cumulative return from month $t-i$ to $t-1$.
-    *   *Calculation*: Rolling sum of log-returns (re-implemented to match paper exactness, not using GHZ pre-calc).
+### Preprocessing Logic (`train.py`)
+1.  **Universe Selection**:
+    *   **Logic**: Top 2000 stocks by Market Capitalization (`mve_m`).
+    *   **Timing**: Selection is based on the **last month** of the training period.
+    *   **Constraint**: Both training and subsequent backtesting are strictly filtered to this universe.
+    *   **Artifact**: The list of 2000 `pernmo`s is saved as `*_universe.npy`.
+2.  **Normalization**:
+    *   z-score normalization: $\frac{x - \mu}{\sigma}$.
+3.  **Winsorization**:
+    *   **Clipping**: Values are clamped to the range $[-5, +5]$ standard deviations (`np.clip`).
+    *   **Purpose**: Outlier suppression (fat tails).
 
-### 2. Fundamental Features (12)
-**Source**: Raw Compustat `fundq` columns. Proxies calculated in `data_loader.py` if specific columns (e.g., `niq`) are missing in raw feed.
-*   **Alignment**: Uses `valid_from` logic from `GHZFactorBuilder` (RDQ or Date+45d) to prevent look-ahead bias.
-*   **Balance Sheet**:
-    *   `atq`: Total Assets
-    *   `ltq`: Total Liabilities
-    *   `dlcq`: Debt in Current Liabilities
-    *   `dlttq`: Long-Term Debt (Proxy: `ltq - lctq` if missing)
-    *   `seqq`: Shareholders' Equity
-    *   `cheq`: Cash and Equivalents
-*   **Income Statement**:
-    *   `saleq`: Sales/Turnover
-    *   `niq`: Net Income (Proxy: `ibq`)
-    *   `oiadpq`: Operating Income After Depreciation
-    *   `piq`: Pretax Income
-    *   `dpq`: Depreciation and Amortization
-    *   `epspxq`: Earnings Per Share (Basic) - Used to derive Price-to-Earnings ratios implicitly.
+### Augmentation (for Contrastive Learning)
+Used in `train.py` to generate views $x_a, x_b$:
+*   **mask_prob**: 0.1 (10% of features set to 0).
+*   **noise_std**: 0.1 (Gaussian noise added).
 
-## Detailed Component Analysis
+## 2. Model Architecture (`orca.py`, `modules.py`)
 
+*   **PLE Encoder**: Piece-wise Linear Encoding ($T$ bins, $D$ embedding dim).
+    *   Defaults: `n_bins=64`, `d_model=128`.
+*   **Transformer Backbone**: 2 Layers, 8 Heads.
+*   **Heads**:
+    *   Instance Head -> $z$ (Contrastive)
+    *   Cluster Head -> $y$ (Softmax over 30 clusters)
+    *   PINN Head -> OU Params $(\theta, \mu, \sigma)$
 
-### 1. Data Loader (`data_loader.py`)
-*   **Goal**: Generate the exact 36 input features used in the paper.
-*   **Inheritance**: Reuses `src.data.ghz_factors.GHZFactorBuilder` to handle raw WRDS data loading and cleaning.
-*   **Features with Special Handling**:
-    *   **Momentum (24 features)**: `mom_1` is simple $t-1$ return. `mom_i` ($i>1$) is the cumulative return over previous $i$ months (excluding current). Implemented via `rolling(window=i).sum()` on log-returns.
-    *   **Fundamentals**: Extracts quarterly items (e.g., `atq`, `ltq`, `niq`) and aligns them to monthly data using `valid_from` (RDQ or Date+45d) via `merge_asof`.
-*   **Key Detail**: The `_merge_custom` method implements a precise `merge_asof` logic to align lower-frequency quarterly data with monthly price data, respecting "knowledge dates" to prevent look-ahead bias.
+## 3. Training Strategy (`train.py`)
 
-### 2. Modules (`modules.py`)
-*   **PLE Phase 1 (Binning)**:
-    *   Implements **Piece-wise Linear Encoding**.
-    *   Use $T=64$ bins (configurable).
-    *   Encodes scalar features into a dense vector representing its position in the distribution.
-    *   **Note**: Uses `torch.linspace(-4, 4)` for efficient binning on StandardScaled data.
-*   **Backbone**:
-    *   A **Bidirectional Transformer** (2 layers, 8 heads).
-    *   Input: `[CLS]` token + 36 feature embeddings.
-    *   Output: The embedding of the `[CLS]` token serves as the asset representation $h$.
+*   **Loss Function**: $L_{total} = L_{ins} + \alpha L_{clu} + \beta L_{PINN}$
+*   **Batching**:
+    *   **Global Shuffle** (Default): Random batches.
+    *   **Monthly Batching** (`--batch_mode monthly`): Batches contain assets from the *same month* only, to remove temporal noise and focus on cross-sectional alpha.
+*   **Hyperparameters**: Exposed via CLI (`--d_model`, `--dropout`, etc.).
 
-### 3. ORCA Model & Unified Loss (`orca.py`)
-*   **Architecture**:
-    *   **Backbone**: `ORCABackbone` (as above).
-    *   **Instance Head**: MLP projecting $h$ to $z$ for instance contrastive learning.
-    *   **Cluster Head**: MLP projecting $h$ to $y$ (Softmax over 30 clusters).
-    *   **OU Head**: MLP projecting Cluster Centroid $\bar{h}_k$ to OU parameters $(\theta, \mu, \sigma)$.
-*   **Losses**:
-    *   **$L_{ins}$ (Instance)**: NT-Xent (SimCLR) loss between augmented views of the same asset. Maximizes similarity $z_a \cdot z_b$.
-    *   **$L_{clu}$ (Cluster)**: Contrastive loss on cluster assignments $y_a, y_b$. Plus Entropy Maximization to prevent cluster collapse.
-    *   **$L_{PINN}$ (Physics-Informed)**: The core innovation.
-        *   Calculates weighted average centroid $\bar{h}_k$ for each cluster.
-        *   Predicts $(\theta_k, \mu_k, \sigma_k)$ for that centroid.
-        *   Validates if asset returns in that cluster follow $dr_t = \theta(\mu - r_t)dt + \sigma dW_t$.
-        *   Minimizes negative log-likelihood of the residual.
+## 4. Backtesting Strategy (`backtest.py`)
 
-### 4. Training (`train.py`)
-*   **Augmentation**:
-    *   **Masking**: Randomly zeros 10% of features.
-    *   **Gaussian Noise**: Adds $\mathcal{N}(0, 0.1)$.
-*   **Data Feeding**:
-    *   Feeds pairs of returns $(r_t, r_{t-1})$ to the model to compute the PINN loss residuals.
+### Setup
+*   **Data**: Daily Price Data (`crsp_dsf`).
+    *   *Fallback*: If daily data is missing, uses Monthly data (`crsp_msf`) as a proxy.
+*   **History Buffer**: Loads `start_year - 1` to ensure the strategy's rolling window is warm-started at Day 0.
+*   **Clusters**: Predictions from the trained ORCA model (monthly freq) are forward-filled to daily.
 
-### 5. Backtest (`backtest.py`)
-*   **Strategy**: Cluster-based Mean Reversion.
-*   **Logic**:
-    *   For each Cluster:
-        *   Rank assets by `mom_1` (Prior 1-month return).
-        *   Calculate Z-Score of `mom_1`.
-        *   **Long**: Z-Score < $-\gamma$ (Losers).
-        *   **Short**: Z-Score > $+\gamma$ (Winners).
-    *   Equal weighted portfolio.
-    *   Monthly rebalancing.
+### Trading Logic (`BaselineStrategy`)
+*   **Signal**: Z-Score of cumulative idiosyncratic returns ($R_{i} - R_{cluster}$).
+*   **Entry**: |Z| > 2.0 (Mean Reversion).
+*   **Exit Rules**:
+    1.  **Last 5 Days**: No new positions allowed.
+    2.  **Last Day**: Force Close all positions.
 
-## Refactoring Notes
-*   Common utility functions (`safe_bool_to_int`, `safe_log`, `clean_infs`, `rolling_*`) were extracted from `src/data/ghz_factors.py` to `src/utils/data_utils.py`.
-*   This ensures that the new `ORCADataLoader` and the existing `GHZFactorBuilder` share the exact same robust numerical handling logic without code duplication.
+## 5. Advanced Workflows
+
+### Rolling Window (`run_rolling.py`)
+Automates the lifecycle:
+1.  **Train**: Years $T \dots T+K$
+2.  **Test**: Year $T+K+1$
+3.  **Slide**: $T \leftarrow T+1$, repeat.
+
+### Auto-Tuning (`run_autotune_orca.py`)
+Grid search optimization validation Sharpe Ratio.
+*   Grid: `d_model` [64, 128], `n_bins` [32, 64], `dropout` [0.1, 0.3].

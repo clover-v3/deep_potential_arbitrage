@@ -103,6 +103,11 @@ class GHZFactorBuilder:
             self.stocknames = None
             print("Warning: crsp_stocknames.parquet not found. Linking will fail.")
 
+        # Load trading calendar (CRSP DSI) for availability shifts if available
+        from src.utils.data_utils import load_trading_days
+        trading_days_path = os.path.join(self.data_root, 'crsp_trading_days.parquet')
+        self.trading_days = load_trading_days(trading_days_path)
+
         print(f"Loaded: Funda {self.funda.shape}, Fundq {self.fundq.shape}, MSF {self.msf.shape}")
 
 
@@ -113,6 +118,8 @@ class GHZFactorBuilder:
         """
         Process Compustat Annual Data (SAS Lines 36-237).
         """
+        # import pdb; pdb.set_trace()
+        print('inside process_annual')
         if self.funda.empty: return pd.DataFrame()
         df = self.funda.copy()
 
@@ -442,6 +449,8 @@ class GHZFactorBuilder:
         """
         Process Compustat Quarterly Data.
         """
+        # import pdb; pdb.set_trace()
+        print('inside process_quarterly')
         if self.fundq.empty: return pd.DataFrame()
         df = self.fundq.copy()
 
@@ -495,11 +504,12 @@ class GHZFactorBuilder:
         df['chtx'] = (df['txtq'] - g['txtq'].shift(4)) / g['atq'].shift(4)
         df['roeq'] = df['ibq'] / g['seqq'].shift(1) # Note: SAS uses 'scal' logic for fallback, simplified here
 
-        # sacc
+        # sacc: short-term accruals
+        # SAS: ((Δactq - Δcheq) - (Δlctq - Δdlcq)) / saleq
         d_actq = df['actq'] - g['actq'].shift(1)
         d_cheq = df['cheq'] - g['cheq'].shift(1)
         d_lctq = df['lctq'] - g['lctq'].shift(1)
-        d_dlcq = g['dlcq'].shift(1) # This was d_dlcq = df['dlcq'] - g['dlcq'].shift(1)
+        d_dlcq = df['dlcq'] - g['dlcq'].shift(1)
         df['sacc'] = ((d_actq - d_cheq) - (d_lctq - d_dlcq)) / df['saleq']
         mask_saleq0 = df['saleq'] <= 0
         df.loc[mask_saleq0, 'sacc'] = ((d_actq - d_cheq) - (d_lctq - d_dlcq)) / 0.01
@@ -572,7 +582,8 @@ class GHZFactorBuilder:
         """
         if self.msf.empty: return pd.DataFrame()
         df = self.msf.copy()
-
+        # import pdb; pdb.set_trace()
+        print('inside process_crsp')
         # Clean: Drop rows where Price is NaN
         # CRSP Price is abs(prc) usually, already handled in Puller?
         # pull_wrds: abs(prc) as prc. But if prc is null, we drop.
@@ -582,8 +593,10 @@ class GHZFactorBuilder:
         df['date'] = pd.to_datetime(df['date'])
 
         # --- Monthly Availability Date ---
-        # User Rule: date + 1 day
-        df['date'] = df['date'] + pd.Timedelta(days=1)
+        # Availability is next trading day after MSF date, using CRSP trading calendar if available.
+        from src.utils.data_utils import shift_to_next_trading_day
+        df['valid_from_monthly'] = shift_to_next_trading_day(df['date'], getattr(self, 'trading_days', None))
+        df['date'] = df['valid_from_monthly']
 
         df = df.sort_values(['permno', 'date'])
 
@@ -822,13 +835,15 @@ class GHZFactorBuilder:
                 # Efficient Merging onto Monthly Backbone?
                 # Asof merge is best
 
-                linked_annual = linked_annual.sort_values('valid_from')
+                # Rename availability for annual layer to keep it in final output
+                linked_annual = linked_annual.rename(columns={'valid_from': 'valid_from_annual'})
+                linked_annual = linked_annual.sort_values('valid_from_annual')
                 df_out = df_out.sort_values('date')
 
                 # Filter Annual to relevant range
                 linked_annual = linked_annual[
-                    (linked_annual['valid_from'] >= min_mkt_date - date_buffer) &
-                    (linked_annual['valid_from'] <= max_mkt_date + date_buffer)
+                    (linked_annual['valid_from_annual'] >= min_mkt_date - date_buffer) &
+                    (linked_annual['valid_from_annual'] <= max_mkt_date + date_buffer)
                 ]
 
                 # Merge Asof for each Permno
@@ -840,9 +855,9 @@ class GHZFactorBuilder:
 
                 df_out = pd.merge_asof(
                     df_out.sort_values('date'),
-                    linked_annual.sort_values('valid_from'),
+                    linked_annual.sort_values('valid_from_annual'),
                     left_on='date',
-                    right_on='valid_from',
+                    right_on='valid_from_annual',
                     by='permno',
                     direction='backward',
                     tolerance=pd.Timedelta(days=365) # Limit lag to 1 year beyond buffer
@@ -878,24 +893,24 @@ class GHZFactorBuilder:
                  mask_q = (merged_q['datadate'] >= merged_q['namedt']) & (merged_q['datadate'] <= merged_q['nameenddt'])
                  linked_q = merged_q[mask_q].copy()
 
-                  # valid_from already computed in process_quarterly
-                  # linked_q['valid_from'] = linked_q['datadate'] + pd.DateOffset(months=4)
+                 # valid_from already computed in process_quarterly; keep it but rename for clarity
+                 linked_q = linked_q.rename(columns={'valid_from': 'valid_from_quarterly'})
 
                  # Merge Asof
-                 linked_q = linked_q.sort_values('valid_from')
+                 linked_q = linked_q.sort_values('valid_from_quarterly')
                  df_out = df_out.sort_values('date')
 
                  # Filter Quarterly to relevant range
                  linked_q = linked_q[
-                     (linked_q['valid_from'] >= min_mkt_date - date_buffer) &
-                     (linked_q['valid_from'] <= max_mkt_date + date_buffer)
+                     (linked_q['valid_from_quarterly'] >= min_mkt_date - date_buffer) &
+                     (linked_q['valid_from_quarterly'] <= max_mkt_date + date_buffer)
                  ]
 
                  df_out = pd.merge_asof(
                      df_out,
                      linked_q,
                      left_on='date',
-                     right_on='valid_from',
+                     right_on='valid_from_quarterly',
                      by='permno',
                      direction='backward',
                      tolerance=pd.Timedelta(days=180), # 6 month freshness? SAS assumes quarterly updates.
@@ -903,7 +918,21 @@ class GHZFactorBuilder:
                  )
                  print(f"Merged Quarterly Data. Shape: {df_out.shape}")
              else:
-                 print("Warning: 'cusip' column missing in quarterly data. Skipping link.")
+                print("Warning: 'cusip' column missing in quarterly data. Skipping link.")
+
+        # 4. Construct additional monthly versions of valuation ratios
+        # These use CRSP monthly size (mve_m) with Compustat fundamentals mapped via valid_from
+        if not df_out.empty and 'mve_m' in df_out.columns:
+            mve_m_denom = df_out['mve_m'].replace(0, np.nan)
+            # Earnings-to-price (monthly)
+            if 'ib' in df_out.columns:
+                df_out['ep_m'] = df_out['ib'] / mve_m_denom
+            # Book-to-market (monthly)
+            if 'ceq' in df_out.columns:
+                df_out['bm_m'] = df_out['ceq'] / mve_m_denom
+            # Sales-to-price (monthly)
+            if 'sale' in df_out.columns:
+                df_out['sp_m'] = df_out['sale'] / mve_m_denom
 
         return df_out
 
@@ -942,12 +971,17 @@ class GHZFactorBuilder:
             mask = (df_final['date'] >= pd.to_datetime(start_date)) & (df_final['date'] <= pd.to_datetime(end_date))
             df_final = df_final[mask]
 
-            # Filter columns: Only Keys + Factors
+            # Filter columns: Only Keys + Factors + explicit availability timestamps
             # This solves the "297 columns" issue by stripping raw vars (at, lt, etc.)
             keys = ['permno', 'date']
             # Ensure factor_list is unique and present
             valid_factors = [c for c in self.factor_list if c in df_final.columns]
-            final_cols = list(set(keys + valid_factors))
+            # Preserve availability timestamps from different layers if present
+            availability_cols = [
+                c for c in ['valid_from_annual', 'valid_from_quarterly', 'valid_from_monthly']
+                if c in df_final.columns
+            ]
+            final_cols = list(set(keys + valid_factors + availability_cols))
             # Sort columns for tidiness
             final_cols = sorted(final_cols)
             # Ensure keys are first

@@ -58,7 +58,7 @@
 
 *   **修改参数 (`src/validation/run_validation.py`):**
     ```python
-    results = run_complete_validation(
+    results = run_complesyte_validation(
         n_stocks=50,
         n_clusters=5,
         n_timesteps=1000,

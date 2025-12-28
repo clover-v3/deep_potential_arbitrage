@@ -1,7 +1,7 @@
 import wrds
 db = wrds.Connection(wrds_username='jliu3074')
 trading_days = db.get_table(library='crsp', table='dsi', columns=['date'])
-print(trading_days)
+# print(trading_days)
 import pdb; pdb.set_trace()
 vars_funda = db.describe_table(library='comp', table='funda')['name'].tolist()
 # print(vars_funda)

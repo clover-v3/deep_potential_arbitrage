@@ -14,19 +14,33 @@ from typing import Dict, List, Optional, Union
 
 class BaselineStrategy:
     def __init__(self, entry_z: float = 2.0, exit_z: float = 0.0, window: int = 20,
-                 cost_bps: float = 0.0, signal_method: str = 'threshold', top_k_percent: int = 20):
+                 cost_bps: float = 0.0, signal_method: str = 'threshold', top_k_percent: int = 20,
+                 stop_entry_last_n: int = 3):
+        """
+        Args:
+            entry_z: 开仓/反向开仓阈值（绝对值）。
+            exit_z: 目前未显式使用，预留给将来的显式平仓逻辑。
+            window: 计算累积 idio 收益和波动的滚动窗口长度（交易日）。
+            cost_bps: 单边交易成本（bp）。
+            signal_method: 'threshold' 或 'rank'。
+            top_k_percent: rank 模式下簇内多空比例。
+            stop_entry_last_n: 交易期最后 N 天禁止开新仓（仅允许平仓），N<=0 表示关闭该功能。
+        """
         self.entry_z = entry_z
         self.exit_z = exit_z
         self.window = window
         self.cost_bps = cost_bps
         self.signal_method = signal_method
         self.top_k_percent = top_k_percent
+        self.stop_entry_last_n = stop_entry_last_n
+
 
     def generate_signals(self, merged_df: pd.DataFrame, return_metrics=True):
         """
         Generate signals and calculate returns.
         merged_df: Columns [date, ticker, price, cluster_label, ...]
         """
+        # print('merged_df.columns: ', merged_df.columns)
         merged = merged_df.copy()
         merged['date'] = pd.to_datetime(merged['date'])
 
@@ -102,9 +116,44 @@ class BaselineStrategy:
             merged.loc[merged['rank_in_cluster'] > (merged['n_cluster'] - k_count), 'pos'] = -1
 
         # Format back to Wide for Portfolio Calc
-        # Use PERMNO as identifier
         pos_df = merged.pivot(index='date', columns='permno', values='pos').fillna(0)
         returns = merged.pivot(index='date', columns='permno', values='ret').fillna(0)
+
+        # ------------------------------------------------------------------
+        # 额外约束 1：交易期最后 N 天停止“开新仓”，仅允许平仓
+        # ------------------------------------------------------------------
+        if self.stop_entry_last_n is not None and self.stop_entry_last_n > 0 and not pos_df.empty:
+            # 以当前传入的 merged_df 为“一个交易期”，例如单个测试月
+            all_dates = pos_df.index.sort_values()
+            n = min(int(self.stop_entry_last_n), len(all_dates))
+            last_dates = list(all_dates[-n:])
+
+            # 逐日在宽表上施加“只许平仓，不许新开/反向”的限制
+            for i, d in enumerate(last_dates):
+                # 找到 d 的前一交易日（如果在当前期内不存在，则视为全平仓起点）
+                idx = all_dates.get_loc(d)
+                if idx == 0:
+                    prev_pos_row = pos_df.iloc[0] * 0  # 第一日当作之前全空仓
+                else:
+                    prev_pos_row = pos_df.loc[all_dates[idx - 1]]
+
+                raw_pos_row = pos_df.loc[d]
+                new_row = prev_pos_row.copy()
+
+                # 1）如果之前已经有仓位，只允许“平仓”（从非 0 -> 0），不允许反向开新仓
+                mask_prev_nonzero = prev_pos_row != 0
+                close_mask = mask_prev_nonzero & (raw_pos_row == 0)
+                new_row[close_mask] = 0
+
+                # 2）如果之前是空仓，则保持空仓（禁止从 0 -> ±1）
+                #    其余情况均保持 prev_pos_row
+                pos_df.loc[d] = new_row
+
+            # ------------------------------------------------------------------
+            # 额外约束 2：交易期最后一天强制全平仓
+            # ------------------------------------------------------------------
+            last_day = all_dates[-1]
+            pos_df.loc[last_day] = 0
 
         # Align columns
         pos_df = pos_df.reindex(columns=returns.columns, fill_value=0)

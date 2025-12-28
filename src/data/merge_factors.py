@@ -9,6 +9,8 @@ import numpy as np
 import os
 import argparse
 
+from .ea_factors import attach_ea_factors_to_daily
+
 def load_daily_factors(start_date, end_date, data_root):
     """
     Load partitioned daily factors within range.
@@ -80,7 +82,7 @@ def load_ghz_factors(start_year, end_year, data_root):
 
     return pd.concat(dfs, ignore_index=True).sort_values('date')
 
-def merge_factors(start_date, end_date, daily_dir, ghz_dir, out_dir):
+def merge_factors(start_date, end_date, daily_dir, ghz_dir, out_dir, raw_dir, ea_events_dir=None):
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
 
@@ -91,6 +93,16 @@ def merge_factors(start_date, end_date, daily_dir, ghz_dir, out_dir):
         return
 
     print(f"Daily Data Loaded: {df_daily.shape}. Range: {df_daily['date'].min()} - {df_daily['date'].max()}")
+
+    # 1.5 Attach EA factors to daily backbone
+    # Prefer precomputed EA events directory if provided; otherwise fall back to building from raw_dir.
+    if raw_dir:
+        print(f"Attaching EA factors using raw GHZ data from {raw_dir}...")
+        df_daily = attach_ea_factors_to_daily(
+            df_daily,
+            raw_dir=raw_dir,
+            events_dir=ea_events_dir,
+        )
 
     # 2. Load GHZ Partitioned
     s_year = start_ts.year
@@ -154,7 +166,17 @@ if __name__ == "__main__":
     parser.add_argument("--daily_dir", type=str, default="./data/processed/daily_factors", help="Input directory for Daily Factors")
     parser.add_argument("--ghz_dir", type=str, default="./data/processed/ghz_factors", help="Input directory for GHZ Factors")
     parser.add_argument("--out_dir", type=str, default="./data/processed/merged_factors", help="Output directory for Merged Factors")
+    parser.add_argument("--raw_dir", type=str, default="./data/raw_ghz", help="Raw GHZ directory (for EA factors)")
+    parser.add_argument("--ea_events_dir", type=str, default="./data/processed/ea_events", help="Optional directory of precomputed EA events parquet files")
 
     args = parser.parse_args()
 
-    merge_factors(args.start_date, args.end_date, args.daily_dir, args.ghz_dir, args.out_dir)
+    merge_factors(
+        args.start_date,
+        args.end_date,
+        args.daily_dir,
+        args.ghz_dir,
+        args.out_dir,
+        args.raw_dir,
+        args.ea_events_dir,
+    )

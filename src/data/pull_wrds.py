@@ -10,6 +10,7 @@ Modes:
 - all: Runs all of the above.
 """
 
+import calendar
 import wrds
 import pandas as pd
 import os
@@ -349,15 +350,15 @@ class WRDSDataPuller:
         """Checks for crsp.stocknames, pulls if missing."""
         mapping_path = os.path.join(self.data_root, 'crsp_stocknames.parquet')
 
-        if os.path.exists(mapping_path):
-            print(f"\n[Mapping] Found existing {mapping_path}. Skipping.")
-            return
+        # if os.path.exists(mapping_path):
+        #     print(f"\n[Mapping] Found existing {mapping_path}. Skipping.")
+        #     return
 
         if not self.db: self.connect()
         print("\n[Mapping] Pulling CRSP Stocknames...")
 
         q_names = """
-            SELECT permno, permco, ncusip, namedt, nameendt, ticker, siccd, shrcd, exchcd
+            SELECT permno, permco, ncusip, namedt, nameenddt, ticker, siccd, shrcd, exchcd
             FROM crsp.stocknames
         """
         try:
@@ -367,6 +368,26 @@ class WRDSDataPuller:
             print(f"Done. {self._process_stats(df)}")
         except Exception as e:
             print(f"Failed to pull mapping: {e}")
+
+    def pull_calendar(self):
+        """Checks for crsp.dsi, pulls if missing."""
+        calendar_path = os.path.join(self.data_root, 'crsp_trading_days.parquet')
+
+        # if os.path.exists(calendar_path):
+        #     print(f"\n[Calendar] Found existing {calendar_path}. Skipping.")
+        #     return
+
+        if not self.db: self.connect()
+        print("\n[Calendar] Pulling CRSP Calendar...")
+
+
+        try:
+            df = self.db.get_table(library='crsp', table='dsi', columns=['date'])
+            if not df.empty:
+                df.to_parquet(calendar_path)
+            print(f"Done. {self._process_stats(df)}")
+        except Exception as e:
+            print(f"Failed to pull calendar: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="WRDS Data Downloader (Modular)")
@@ -382,6 +403,7 @@ def main():
 
     if args.mode in ['all', 'mapping']:
         puller.pull_mapping()
+        puller.pull_calendar()
 
     if args.mode in ['all', 'low_freq']:
         puller.pull_low_freq()

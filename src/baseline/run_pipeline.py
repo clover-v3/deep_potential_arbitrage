@@ -120,7 +120,8 @@ def clean_features(df_train, feature_cols):
 def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 12,
                          method: str = 'kmeans', n_clusters: int = 10, dist_quantile: float = None,
                          outlier_percentile: float = 95.0,
-                         feature_set: str = 'all', # 'all' or 'price_only'
+                         feature_set: str = 'all',  # 'all' or 'price_only'
+                         universe_top_n: float | int | None = 2000,
                          strategy_kwargs: dict = None,
                          data_dir: str = "data/processed/merged_factors",
                          output_subdir: str = "default",
@@ -140,13 +141,20 @@ def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 
     print(f"Features: {feature_set}")
     print(f"Strategy Kwargs: {strategy_kwargs}")
 
+    # Strategy rolling window (for idiosyncratic z-score) – used to decide how
+    # many days of pre-history we need to attach to each test month so that
+    # trading can start from the first test day.
+    # If user passed a custom 'window' into BaselineStrategy via strategy_kwargs,
+    # we honor it; otherwise default to 20.
+    signal_window = int(strategy_kwargs.get('window', 20))
+
     # ... setup paths ...
     base_res_dir = f"results/baseline/{output_subdir}"
     os.makedirs(base_res_dir, exist_ok=True)
 
     # 1. Load Data with Buffer
     test_start_dt = pd.to_datetime(start_date)
-
+    # Approximate lookback buffer (Lookback + 1 month buffer for safety)
     if preloaded_df is not None:
         if preprocessed_data:
             # Zero-copy optimization: Assume passed DF is already filtered, sorted, and has 'year_month'
@@ -168,6 +176,7 @@ def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 
         load_start = test_start_dt - pd.Timedelta(days=buffer_days)
         print(f"Loading data from {load_start.date()} (buffer for training)")
         full_df = load_data(load_start, end_date, data_dir=data_dir)
+
 
     if full_df.empty:
         print("Error: No data loaded.")
@@ -203,10 +212,11 @@ def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 
     for m in test_months:
         print(f"\nProcessing Month: {m}")
 
-        # Test Data
+        # Test (Trading) Data for this month
         mask_test = (full_df['year_month'] == m)
         df_test = full_df[mask_test].copy()
-        if df_test.empty: continue
+        if df_test.empty:
+            continue
 
         # Train Window
         train_end_month = m - 1
@@ -221,10 +231,66 @@ def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 
 
         print(f"Train Window: {train_start_month} to {train_end_month} ({len(df_train)} rows)")
 
-        # Snapshot Data (Last Day of Training)
+        # ------------------------------------------------------------------
+        # Universe Selection (Top-N by Market Cap at last training day)
+        # ------------------------------------------------------------------
+        # 1) Determine last training day snapshot
         last_day_train = df_train['date'].max()
         df_snapshot = df_train[df_train['date'] == last_day_train].copy()
         df_snapshot = df_snapshot.drop_duplicates(subset=['permno'])
+
+        # 2) If requested, restrict to a Top-N universe based on market cap proxy.
+        #    - Prefer prc * shrout if both available.
+        #    - Fallback to prc * vol if shrout missing.
+        #    - If N is None / NaN / >= total, keep full universe.
+        if universe_top_n is not None:
+            try:
+                # Handle np.nan gracefully
+                if isinstance(universe_top_n, float) and np.isnan(universe_top_n):
+                    effective_top_n = None
+                else:
+                    effective_top_n = int(universe_top_n)
+            except (TypeError, ValueError):
+                effective_top_n = None
+
+            if effective_top_n is not None and effective_top_n > 0:
+                # Build market-cap-like metric
+                mkt_cap = None
+                if {'prc', 'shrout'}.issubset(df_snapshot.columns):
+                    mkt_cap = (df_snapshot['prc'].astype(float) *
+                               df_snapshot['shrout'].astype(float))
+                elif {'prc', 'vol'}.issubset(df_snapshot.columns):
+                    mkt_cap = (df_snapshot['prc'].astype(float) *
+                               df_snapshot['vol'].astype(float))
+
+                if mkt_cap is not None:
+                    df_snapshot = df_snapshot.assign(_universe_mktcap=mkt_cap)
+                    df_snapshot = df_snapshot.dropna(subset=['_universe_mktcap'])
+
+                    if not df_snapshot.empty:
+                        df_snapshot_sorted = df_snapshot.sort_values(
+                            '_universe_mktcap', ascending=False
+                        )
+                        all_permnos = df_snapshot_sorted['permno'].unique()
+
+                        # If N >= universe size, keep all; else take Top-N
+                        if effective_top_n >= len(all_permnos):
+                            selected_permnos = all_permnos
+                        else:
+                            selected_permnos = all_permnos[:effective_top_n]
+
+                        selected_permnos = set(selected_permnos)
+
+                        # Apply universe filter to train / test data for this month
+                        df_train = df_train[df_train['permno'].isin(selected_permnos)].copy()
+                        df_test = df_test[df_test['permno'].isin(selected_permnos)].copy()
+
+                        # Rebuild snapshot after filtering
+                        df_snapshot = df_train[df_train['date'] == last_day_train].copy()
+                        df_snapshot = df_snapshot.drop_duplicates(subset=['permno'])
+
+                        print(f"Universe filter applied: Top-{effective_top_n} names "
+                              f"(actual {len(selected_permnos)} permnos) on {last_day_train.date()}")
 
         if df_snapshot.empty or len(df_snapshot) < 50:
             print("Snapshot insufficient.")
@@ -299,30 +365,55 @@ def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 
         df_snapshot_with_labels['cluster'] = labels_snapshot
         ticker_cluster_map = df_snapshot_with_labels.set_index('permno')['cluster'].to_dict()
 
-        # Apply to df_test
-        df_test['cluster_label'] = df_test['permno'].map(ticker_cluster_map)
+        # ------------------------------------------------------------------
+        # Build signal DataFrame with extra pre-history for rolling window
+        # ------------------------------------------------------------------
+        # Trading period for this month:
+        trade_start = df_test['date'].min()
+        trade_end = df_test['date'].max()
+
+        # To allow the strategy's rolling window to be "warm" from the first
+        # trading day, we attach ~signal_window worth of history before the
+        # month starts. Use 2x for calendar-day safety (holidays, weekends).
+        hist_buffer_days = max(signal_window * 2, signal_window)
+        hist_start = trade_start - pd.Timedelta(days=hist_buffer_days)
+
+        # Signal universe is exactly the set of permnos present in the snapshot
+        # / cluster map (after any Top-N filtering).
+        signal_permnos = set(ticker_cluster_map.keys())
+
+        mask_signals = (
+            (full_df['date'] >= hist_start)
+            & (full_df['date'] <= trade_end)
+            & (full_df['permno'].isin(signal_permnos))
+        )
+        df_signals = full_df[mask_signals].copy()
+
+        # Attach cluster labels to the extended history
+        df_signals['cluster_label'] = df_signals['permno'].map(ticker_cluster_map)
 
         # Drop unclustered (NaN or -1)
-        # -1 is noise from DBSCAN
-        df_test = df_test.dropna(subset=['cluster_label'])
-        df_test = df_test[df_test['cluster_label'] != -1]
+        df_signals = df_signals.dropna(subset=['cluster_label'])
+        df_signals = df_signals[df_signals['cluster_label'] != -1]
 
-        if df_test.empty:
-            print("No valid clusters for trading.")
+        if df_signals.empty:
+            print("No valid clusters for trading after attaching history.")
             continue
 
         # 3. Strategy
         strategy = BaselineStrategy(**strategy_kwargs)
 
-        # Prepare for strategy (Wide format? Strategy handles Long format now)
         # Strategy.generate_signals expects Long format with 'cluster_label'
+        month_res = strategy.generate_signals(df_signals)
 
-        month_res = strategy.generate_signals(df_test)
-
-        # Collect 'total_pnl' (Series index by date) or 'daily_ret'
-        # We want to concatenate daily returns for the whole backtest
+        # Collect 'daily_ret' but only over the actual trading month
         if month_res['daily_ret'] is not None and not month_res['daily_ret'].empty:
-             all_signals.append(month_res['daily_ret'])
+            daily_ret = month_res['daily_ret']
+            # Restrict to trading-period dates for this month
+            mask_month = (daily_ret.index >= trade_start) & (daily_ret.index <= trade_end)
+            daily_ret_month = daily_ret.loc[mask_month]
+            if not daily_ret_month.empty:
+                all_signals.append(daily_ret_month)
 
     if not all_signals:
         print("No signals generated.")
@@ -333,7 +424,7 @@ def run_rolling_pipeline(start_date: str, end_date: str, lookback_months: int = 
 
     base_res_dir = f"results/baseline/{output_subdir}"
     os.makedirs(base_res_dir, exist_ok=True)
-    full_pnl.to_csv(os.path.join(base_res_dir, "rolling_pnl.csv"))
+    full_pnl.to_csv(os.path.join(base_res_dir, f"rolling_pnl_{start_date}_{end_date}.csv"))
     print(f"Saved results to {base_res_dir}")
 
     # Calculate overall metrics if requested

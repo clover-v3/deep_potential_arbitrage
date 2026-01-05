@@ -21,9 +21,9 @@ def calc_metrics(res_df):
         return {}
 
     # Annualized Return & Vol
-    # Assuming monthly rebalancing (12 periods/year)
-    ann_ret = res_df['ret'].mean() * 12
-    ann_vol = res_df['ret'].std() * np.sqrt(12) + 1e-9
+    # Backtest works on Daily Returns now (252 periods/year)
+    ann_ret = res_df['ret'].mean() * 252
+    ann_vol = res_df['ret'].std() * np.sqrt(252) + 1e-9
 
     # Sharpe Ratio
     sharpe = ann_ret / ann_vol
@@ -63,12 +63,26 @@ def main():
     parser.add_argument("--device", type=str, default=None, help="cuda/mps/cpu")
     parser.add_argument("--batch_mode", type=str, default="global", help="global/monthly")
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--lr", type=float, default=0.002, help="Learning Rate")
     parser.add_argument("--smoke_test", action="store_true", help="Run fast smoke test")
 
     # Hyperparams
     parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--n_bins", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--output_dir", type=str, default=".", help="Directory to save results")
+    parser.add_argument("--cache_dir", type=str, default=None, help="Feature cache directory")
+    parser.add_argument("--universe_dir", type=str, default=None, help="Shared universe directory")
+
+    # Augmentation
+    parser.add_argument("--aug_mask", type=float, default=0.1)
+    parser.add_argument("--aug_noise", type=float, default=0.1)
+
+    # Loss Params
+    parser.add_argument("--manual_loss", action="store_true", help="Use manual weights")
+    parser.add_argument("--lambda_ins", type=float, default=1.0)
+    parser.add_argument("--lambda_clu", type=float, default=1.0)
+    parser.add_argument("--lambda_pinn", type=float, default=1.0)
 
     args = parser.parse_args()
 
@@ -112,7 +126,9 @@ def main():
 
         print(f"\n>>> Cycle: Train {train_start}-{train_end} | Test {current_test_start}-{test_end}")
 
-        model_name = f"orca_model_{current_test_start}.pth"
+        # Unique Model Name
+        model_name = os.path.join(args.output_dir, f"orca_model_{current_test_start}.pth")
+        run_name = f"backtest_{current_test_start}"
 
         # 1. Train
         # Note: We pass batch_mode (if implemented)
@@ -125,6 +141,7 @@ def main():
             f"--data_root {args.data_root} "
             f"--start_year {train_start} --end_year {train_end} "
             f"--epochs {args.epochs} "
+            f"--lr {args.lr} "
             f"--save_path {model_name} "
         )
         if args.device:
@@ -134,11 +151,22 @@ def main():
         if args.batch_mode:
             train_cmd += f"--batch_mode {args.batch_mode} "
 
+        if args.cache_dir:
+            train_cmd += f"--cache_dir {args.cache_dir} "
+
+        if args.universe_dir:
+            train_cmd += f"--universe_dir {args.universe_dir} "
+
         if args.smoke_test:
             train_cmd += "--smoke_test "
 
         # Hyperparams
         train_cmd += f"--d_model {args.d_model} --n_bins {args.n_bins} --dropout {args.dropout} "
+        train_cmd += f"--aug_mask {args.aug_mask} --aug_noise {args.aug_noise} "
+
+        # Loss Params
+        if args.manual_loss:
+            train_cmd += f"--manual_loss --lambda_ins {args.lambda_ins} --lambda_clu {args.lambda_clu} --lambda_pinn {args.lambda_pinn} "
 
         run_command(train_cmd)
 
@@ -148,21 +176,32 @@ def main():
             f"--data_root {args.data_root} "
             f"--model_path {model_name} "
             f"--start_year {current_test_start} --end_year {test_end} "
+            f"--d_model {args.d_model} --n_bins {args.n_bins} --dropout {args.dropout} "
+            f"--output_dir {args.output_dir} "
+            f"--output_dir {args.output_dir} "
+            f"--run_name {run_name} "
         )
+        if args.cache_dir:
+            backtest_cmd += f"--cache_dir {args.cache_dir} "
+
+        if args.universe_dir:
+            backtest_cmd += f"--universe_dir {args.universe_dir} "
+
         if args.device:
             backtest_cmd += f"--device {args.device} "
 
         run_command(backtest_cmd)
 
         # 3. Collect Results
-        if os.path.exists("backtest_results.csv"):
-            df = pd.read_csv("backtest_results.csv")
+        res_file = os.path.join(args.output_dir, f"{run_name}_results.csv")
+        if os.path.exists(res_file):
+            df = pd.read_csv(res_file)
             # Tag with cycle info
             df['train_start'] = train_start
             df['train_end'] = train_end
             all_results.append(df)
         else:
-            print("Warning: backtest_results.csv not found.")
+            print(f"Warning: {res_file} not found.")
 
         # Move forward
         # Slide by test_years to ensure contiguous non-overlapping test windows
@@ -174,7 +213,8 @@ def main():
 
     # 4. Consolidate
     master_df = pd.concat(all_results, ignore_index=True)
-    master_df.to_csv("rolling_results_full.csv", index=False)
+    master_path = os.path.join(args.output_dir, "rolling_results_full.csv")
+    master_df.to_csv(master_path, index=False)
 
     # 5. Global Metrics
     print("\n" + "="*40)
@@ -218,8 +258,9 @@ def main():
         plt.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig("rolling_backtest_plots.png")
-        print("Plots saved to rolling_backtest_plots.png")
+        plot_path = os.path.join(args.output_dir, "rolling_backtest_plots.png")
+        plt.savefig(plot_path)
+        print(f"Plots saved to {plot_path}")
 
     except Exception as e:
         print(f"Plotting error: {e}")

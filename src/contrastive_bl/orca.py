@@ -47,6 +47,10 @@ class ORCAModel(nn.Module):
             # Output ranges: theta>0, sigma>0. We handle this in forward (Softplus)
         )
 
+        # Loss Params for Automatic Weighting (Kendall et al. 2018)
+        # s_ins, s_clu, s_pinn
+        self.log_vars = nn.Parameter(torch.zeros(3))
+
     def forward(self, x):
         # x: (Batch, N_features)
         h = self.backbone(x)
@@ -214,3 +218,21 @@ class ORCAModel(nn.Module):
         loss = F.cross_entropy(logits, labels)
 
         return loss
+
+    def get_weighted_loss(self, l_ins, l_clu, l_pinn):
+        """
+        Compute weighted loss using learned homoscedastic uncertainty.
+        L = Sum (1/2 * exp(-s_i) * L_i + 1/2 * s_i)
+        """
+        # precision = exp(-log_var)
+        precision = torch.exp(-self.log_vars)
+
+        # Losses: [Ins, Clu, PINN]
+        # Weighted sum
+        # L_total = 0.5 * (precision[0]*l_ins + log_vars[0]) + ...
+
+        loss_ins = 0.5 * (precision[0] * l_ins + self.log_vars[0])
+        loss_clu = 0.5 * (precision[1] * l_clu + self.log_vars[1])
+        loss_pinn = 0.5 * (precision[2] * l_pinn + self.log_vars[2])
+
+        return loss_ins + loss_clu + loss_pinn

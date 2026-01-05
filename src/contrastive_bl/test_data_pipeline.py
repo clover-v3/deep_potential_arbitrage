@@ -7,9 +7,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 
 from src.contrastive_bl.data_loader import ORCADataLoader
 
-def test_pipeline():
+def test_pipeline(data_root, start_year, end_year):
     print("Testing ORCA Data Pipeline...")
-    data_root = './data/raw_ghz'
 
     # Check if data exists
     if not os.path.exists(data_root):
@@ -19,8 +18,8 @@ def test_pipeline():
     loader = ORCADataLoader(data_root)
 
     # Load 2020-2023 (Based on what we saw in the dir)
-    print("1. Loading Data (2020-2023)...")
-    loader.load_data(2020, 2023)
+    print(f"1. Loading Data ({start_year}-{end_year})...")
+    loader.load_data(start_year, end_year)
 
     if loader.builder.funda.empty:
         print("WARNING: Funda is empty.")
@@ -59,4 +58,11 @@ def test_pipeline():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    test_pipeline()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_root", type=str, default="./data/raw_ghz")
+    parser.add_argument("--start_year", type=int, default=2020)
+    parser.add_argument("--end_year", type=int, default=2023)
+    args = parser.parse_args()
+
+    test_pipeline(args.data_root, args.start_year, args.end_year)

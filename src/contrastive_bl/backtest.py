@@ -11,8 +11,19 @@ from src.contrastive_bl.data_loader import ORCADataLoader
 from src.contrastive_bl.orca import ORCAModel
 from src.baseline.strategy import BaselineStrategy
 
-def load_universe(model_path):
+def load_universe(model_path, universe_dir=None, test_start_year=None):
     """Load Saved Universe (.npy) if available"""
+    # 1. Check Shared Dir
+    if universe_dir and test_start_year:
+         train_end_year = test_start_year - 1
+         uni_path = os.path.join(universe_dir, f"universe_{train_end_year}.npy")
+         if os.path.exists(uni_path):
+             print(f"Loading Shared Universe from {uni_path}")
+             return np.load(uni_path, allow_pickle=True)
+         else:
+             print(f"Shared universe not found at {uni_path}. Falling back to model path.")
+
+    # 2. Fallback to model neighbor
     uni_path = model_path.replace('.pth', '_universe.npy')
     if os.path.exists(uni_path):
         print(f"Loading Universe from {uni_path}")
@@ -21,12 +32,21 @@ def load_universe(model_path):
         print("Warning: Universe file not found. Trading all stocks.")
         return None
 
+
+
 def backtest_orca(
     data_root,
     model_path='orca_model.pth',
     start_year=2021,
     end_year=2021,
-    device=None
+    device=None,
+    d_model=128,
+    n_bins=64,
+    dropout=0.1,
+    output_dir='.',
+    cache_dir=None,
+    universe_dir=None,
+    run_name='backtest'
 ):
     # Auto-detect device
     if device is None:
@@ -41,13 +61,13 @@ def backtest_orca(
 
     # 1. Load Data (Monthly) for Clustering
     # We still use monthly features to determine the clusters
-    loader = ORCADataLoader(data_root)
+    loader = ORCADataLoader(data_root, cache_dir=cache_dir)
     print(f"Loading monthly data for years {start_year-1} to {end_year}...")
     loader.load_data(start_year, end_year)
-    df_monthly = loader.build_orca_features()
+    df_monthly = loader.get_features()
 
     # 2. Filter by Universe (if trained on subset)
-    universe = load_universe(model_path)
+    universe = load_universe(model_path, universe_dir, start_year)
     if universe is not None:
         print(f"Filtering Backtest Universe: {len(universe)} stocks")
         df_monthly = df_monthly[df_monthly['permno'].isin(universe)].copy()
@@ -64,11 +84,22 @@ def backtest_orca(
 
     print(f"Features: {len(feature_cols)}")
 
-    model = ORCAModel(n_features=len(feature_cols), n_clusters=30).to(device)
+    model = ORCAModel(
+        n_features=len(feature_cols),
+        n_clusters=30,
+        d_model=d_model,
+        n_bins=n_bins,
+        dropout=dropout
+    ).to(device)
+
     try:
         model.load_state_dict(torch.load(model_path, map_location=device))
     except FileNotFoundError:
         print(f"Error: Model file {model_path} not found.")
+        return
+    except RuntimeError as e:
+        print(f"Error loading state dict: {e}")
+        print("Hint: Check if d_model/n_bins match training config.")
         return
 
     model.eval()
@@ -129,10 +160,19 @@ def backtest_orca(
     years_to_load = [start_year - 1, start_year] if start_year == end_year else range(start_year - 1, end_year + 1)
 
     if os.path.exists(dsf_path):
+        print(f"DEBUG: Found dsf_path: {dsf_path}")
         for y in years_to_load:
-            fpath = os.path.join(dsf_path, f"dsf_{y}.parquet")
-            if os.path.exists(fpath):
-                daily_dfs.append(pd.read_parquet(fpath))
+            for m in range(1, 13):
+                fname = f"dsf_{y}_{m:02d}.parquet"
+                fpath = os.path.join(dsf_path, fname)
+                if os.path.exists(fpath):
+                    if len(daily_dfs) < 5: # Limit debug output
+                        print(f"DEBUG: Found daily file: {fpath}")
+                    daily_dfs.append(pd.read_parquet(fpath))
+                # else:
+                #      print(f"DEBUG: Missing daily file: {fpath}")
+    else:
+        print(f"DEBUG: dsf_path NOT FOUND: {dsf_path} (data_root: {data_root})")
 
     if not daily_dfs:
         print("Warning: No Daily Data (crsp_dsf) found. Falling back to Monthly (MSF) as daily proxy.")
@@ -167,6 +207,10 @@ def backtest_orca(
 
     daily_df = daily_df.sort_values('date')
     cluster_map = cluster_map.sort_values('date')
+
+    # Fix Merge Types
+    daily_df['permno'] = daily_df['permno'].astype('int64')
+    cluster_map['permno'] = cluster_map['permno'].astype('int64')
 
     merged = pd.merge_asof(
         daily_df,
@@ -209,8 +253,6 @@ def backtest_orca(
     print(f"Backtest Period: {final_port_ret.index.min()} to {final_port_ret.index.max()}")
 
     # 8. Metrics & Plotting
-
-    # 8. Metrics & Plotting
     metrics = strategy.get_summary_metrics(final_port_ret)
 
     print("\n" + "="*40)
@@ -223,20 +265,25 @@ def backtest_orca(
     print("="*40)
 
     # Save Results
+    os.makedirs(output_dir, exist_ok=True)
+    res_csv = os.path.join(output_dir, f"{run_name}_results.csv")
+
     df_res = pd.DataFrame({
         'date': final_port_ret.index,
         'ret': final_port_ret.values
     })
-    df_res.to_csv("backtest_results.csv", index=False)
-    print("Detailed results saved to backtest_results.csv")
+    df_res.to_csv(res_csv, index=False)
+    print(f"Detailed results saved to {res_csv}")
 
     # Plot
     plt.figure(figsize=(10, 6))
     (1 + final_port_ret).cumprod().plot()
     plt.title(f"Cumulative Return (Sharpe: {metrics['sharpe']:.2f})")
     plt.grid(True, alpha=0.3)
-    plt.savefig("backtest_plots.png")
-    print("Plots saved to backtest_plots.png")
+
+    plot_path = os.path.join(output_dir, f"{run_name}_plots.png")
+    plt.savefig(plot_path)
+    print(f"Plots saved to {plot_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -246,6 +293,28 @@ if __name__ == "__main__":
     parser.add_argument("--end_year", type=int, default=2021)
     parser.add_argument("--device", type=str, default=None)
 
+    # Hyperparams
+    parser.add_argument("--d_model", type=int, default=128)
+    parser.add_argument("--n_bins", type=int, default=64)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--output_dir", type=str, default=".")
+    parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--universe_dir", type=str, default=None)
+    parser.add_argument("--run_name", type=str, default="backtest")
+
     args = parser.parse_args()
 
-    backtest_orca(args.data_root, args.model_path, start_year=args.start_year, end_year=args.end_year, device=args.device)
+    backtest_orca(
+        args.data_root,
+        args.model_path,
+        start_year=args.start_year,
+        end_year=args.end_year,
+        device=args.device,
+        d_model=args.d_model,
+        n_bins=args.n_bins,
+        dropout=args.dropout,
+        output_dir=args.output_dir,
+        cache_dir=args.cache_dir,
+        universe_dir=args.universe_dir,
+        run_name=args.run_name
+    )

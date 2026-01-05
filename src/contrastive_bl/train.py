@@ -73,12 +73,16 @@ class MonthlyBatchSampler(Sampler):
 
 def train_orca(
     data_root,
+    cache_dir=None,
     epochs=100,
     batch_size=1024,
     lr=0.002,
-    alpha=1.0,
-    beta=1.0,
+    lambda_ins=1.0,
+    lambda_clu=1.0,
+    lambda_pinn=1.0,
+    manual_loss=False,
     save_path='orca_model.pth',
+    universe_dir=None,
     device = None,
     start_year=2000,
     end_year=2023,
@@ -86,7 +90,9 @@ def train_orca(
     batch_mode='global',
     d_model=128,
     n_bins=64,
-    dropout=0.1
+    dropout=0.1,
+    aug_mask=0.1,
+    aug_noise=0.1
 ):
     # Auto-detect device if not specified
     if device is None:
@@ -100,11 +106,12 @@ def train_orca(
     print(f"Training ORCA on {device} (Batch Mode: {batch_mode}, d_model={d_model})...")
 
     # 1. Load Data
-    loader = ORCADataLoader(data_root)
+    # 1. Load Data
+    loader = ORCADataLoader(data_root, cache_dir=cache_dir)
     # Load recent data for training
     print(f"Loading and building features ({start_year}-{end_year})...")
     loader.load_data(start_year, end_year)
-    df = loader.build_orca_features()
+    df = loader.get_features()
 
     if df.empty:
         print("Error: No data loaded. Cannot train.")
@@ -130,17 +137,28 @@ def train_orca(
         # Sort by MVE and take top 2000
         # Check if mve_m is valid
         if not last_month_df.empty:
-            top_2000 = last_month_df.sort_values('mve_m', ascending=False).head(2000)
-            universe_permnos = top_2000['permno'].unique()
+            # Universe Path Logic
+            if universe_dir:
+                os.makedirs(universe_dir, exist_ok=True)
+                uni_save_path = os.path.join(universe_dir, f"universe_{end_year}.npy")
+            else:
+                uni_save_path = save_path.replace('.pth', '_universe.npy')
+
+            # Check if exists (only if universe_dir provided, or always?)
+            # If universe_dir provided, we trust it.
+            if universe_dir and os.path.exists(uni_save_path):
+                print(f"Loading shared universe from {uni_save_path}")
+                universe_permnos = np.load(uni_save_path, allow_pickle=True)
+            else:
+                top_2000 = last_month_df.sort_values('mve_m', ascending=False).head(2000)
+                universe_permnos = top_2000['permno'].unique()
+                np.save(uni_save_path, universe_permnos)
+                print(f"Saved universe to {uni_save_path}")
+
             print(f"Universe selected: {len(universe_permnos)} stocks.")
 
             # Filter Training Data to this Universe
             df = df[df['permno'].isin(universe_permnos)].copy()
-
-            # Save Universe
-            uni_save_path = save_path.replace('.pth', '_universe.npy')
-            np.save(uni_save_path, universe_permnos)
-            print(f"Saved universe to {uni_save_path}")
         else:
              print("Warning: Last month data empty, skipping universe selection.")
     else:
@@ -230,14 +248,17 @@ def train_orca(
             x, r = x.to(device), r.to(device)
 
             # Augment
-            x_a = augment(x)
-            x_b = augment(x)
+            x_a = augment(x, mask_prob=aug_mask, noise_std=aug_noise)
+            x_b = augment(x, mask_prob=aug_mask, noise_std=aug_noise)
 
             optimizer.zero_grad()
 
             l_ins, l_clu, l_pinn = model.compute_loss(x_a, x_b, r)
 
-            loss = l_ins + alpha * l_clu + beta * l_pinn
+            if manual_loss:
+                 loss = lambda_ins * l_ins + lambda_clu * l_clu + lambda_pinn * l_pinn
+            else:
+                 loss = model.get_weighted_loss(l_ins, l_clu, l_pinn)
 
             loss.backward()
             optimizer.step()
@@ -266,7 +287,10 @@ def train_orca(
                 x_b = augment(x)
                 l_ins, l_clu, l_pinn = model.compute_loss(x_a, x_b, r)
 
-                loss = l_ins + alpha * l_clu + beta * l_pinn
+                if manual_loss:
+                     loss = lambda_ins * l_ins + lambda_clu * l_clu + lambda_pinn * l_pinn
+                else:
+                     loss = model.get_weighted_loss(l_ins, l_clu, l_pinn)
                 val_loss += loss.item()
 
         avg_val_loss = val_loss / (i_v + 1)
@@ -282,28 +306,43 @@ def train_orca(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default="./data/raw_ghz")
+    parser.add_argument("--cache_dir", type=str, default=None, help="Path to feature cache")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--lr", type=float, default=0.002, help="Learning Rate")
     parser.add_argument("--start_year", type=int, default=2000)
     parser.add_argument("--end_year", type=int, default=2023)
     parser.add_argument("--smoke_test", action="store_true", help="Run fast smoke test")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/mps/cpu)")
     parser.add_argument("--batch_mode", type=str, default="global", help="global/monthly")
     parser.add_argument("--save_path", type=str, default="orca_model.pth", help="Path to save model")
+    parser.add_argument("--universe_dir", type=str, default=None, help="Shared universe directory")
 
     # Hyperparams
     parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--n_bins", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
 
+    # Augmentation
+    parser.add_argument("--aug_mask", type=float, default=0.1)
+    parser.add_argument("--aug_noise", type=float, default=0.1)
+
+    # Loss Balancing
+    parser.add_argument("--manual_loss", action="store_true", help="Use manual lambda weights instead of auto")
+    parser.add_argument("--lambda_ins", type=float, default=1.0)
+    parser.add_argument("--lambda_clu", type=float, default=1.0)
+    parser.add_argument("--lambda_pinn", type=float, default=1.0)
+
     args = parser.parse_args()
 
     train_orca(
         data_root=args.data_root,
+        cache_dir=args.cache_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        lr=0.002,
+        lr=args.lr,
         save_path=args.save_path,
+        universe_dir=args.universe_dir,
         device=args.device,
         start_year=args.start_year,
         end_year=args.end_year,
@@ -311,5 +350,11 @@ if __name__ == "__main__":
         batch_mode=args.batch_mode,
         d_model=args.d_model,
         n_bins=args.n_bins,
-        dropout=args.dropout
+        dropout=args.dropout,
+        aug_mask=args.aug_mask,
+        aug_noise=args.aug_noise,
+        manual_loss=args.manual_loss,
+        lambda_ins=args.lambda_ins,
+        lambda_clu=args.lambda_clu,
+        lambda_pinn=args.lambda_pinn
     )

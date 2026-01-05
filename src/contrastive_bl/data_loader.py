@@ -5,12 +5,93 @@ from src.data.ghz_factors import GHZFactorBuilder
 from src.utils.data_utils import clean_infs
 
 class ORCADataLoader:
-    def __init__(self, data_root: str):
+    def __init__(self, data_root: str, cache_dir: str = None):
         self.builder = GHZFactorBuilder(data_root)
 
+        # Default cache dir is sibling to data_root
+        if cache_dir is None:
+            parent = os.path.dirname(data_root.rstrip('/'))
+            self.cache_dir = os.path.join(parent, "orca_feature_cache")
+        else:
+            self.cache_dir = cache_dir
+
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir, exist_ok=True)
+            print(f"Created cache directory: {self.cache_dir}")
+        else:
+            print(f"Using cache directory: {self.cache_dir}")
+
+    def _get_cache_path(self, year):
+        return os.path.join(self.cache_dir, f"orca_features_{year}.parquet")
+
     def load_data(self, start_year: int, end_year: int):
-        """Load raw data using GHZ builder"""
-        self.builder.load_data(start_year, end_year)
+        """
+        Smart Load: Check cache for each year.
+        Process only missing years (with 1 year buffer for lag features).
+        """
+        years = range(start_year, end_year + 1)
+        dfs = []
+        missing_years = []
+
+        # 1. Check Cache
+        for y in years:
+            path = self._get_cache_path(y)
+            if os.path.exists(path):
+                # print(f"Found cache for {y}")
+                dfs.append((y, pd.read_parquet(path)))
+            else:
+                missing_years.append(y)
+
+        # 2. Process Missing
+        if missing_years:
+            min_miss = min(missing_years)
+            max_miss = max(missing_years)
+            print(f"Cache miss for years: {missing_years}. Processing {min_miss}-{max_miss}...")
+
+            # Load Raw with Buffer (Need previous year for momentum)
+            # If rolling window is 24 months, strictly we need 2 years buffer?
+            # data_loader code uses 24 months.
+            # safe assumption: 2 years buffer if possible, or just 2000 start.
+            buffer_start = max(1990, min_miss - 2)
+
+            # We need to re-initialize builder or clear it?
+            # GHZFactorBuilder handles load_data by Accumulating?
+            # No, it usually re-reads.
+
+            print(f"Loading Raw Data ({buffer_start}-{max_miss}) for Feature Engineering...")
+            self.builder.load_data(buffer_start, max_miss)
+
+            # Compute ALL features for this chunk
+            processed_chunk = self.build_orca_features() # This returns features for buffer_start to max_miss
+
+            if not processed_chunk.empty:
+                processed_chunk['year'] = processed_chunk['date'].dt.year
+
+                # Save each missing year to cache and append to dfs
+                for y in missing_years:
+                    yearly_data = processed_chunk[processed_chunk['year'] == y].copy()
+                    if not yearly_data.empty:
+                        # Drop temp year col
+                        yearly_data = yearly_data.drop(columns=['year'])
+
+                        save_path = self._get_cache_path(y)
+                        yearly_data.to_parquet(save_path)
+                        print(f"Saved cache: {save_path}")
+
+                        dfs.append((y, yearly_data))
+                    else:
+                        print(f"Warning: No data generated for missing year {y}")
+
+        # 3. Concatenate and Return (sorted by year for consistency)
+        dfs.sort(key=lambda x: x[0])
+        self.cached_features = pd.concat([d[1] for d in dfs], ignore_index=True)
+
+        # Ensure sorted
+        if 'date' in self.cached_features.columns:
+            self.cached_features = self.cached_features.sort_values(['date', 'permno'])
+
+    def get_features(self):
+        return self.cached_features
 
     def build_orca_features(self) -> pd.DataFrame:
         """
@@ -256,7 +337,22 @@ class ORCADataLoader:
         fundq_perm = fundq_perm.sort_values(['date'])
 
         # Drop overlapping cols
-        cols_to_use = [c for c in fundq_perm.columns if c not in msf.columns and c != 'permno']
+        # Drop overlapping cols and metadata
+        meta_cols = ['namedt', 'nameendt', 'cusip6', 'ncusip6', 'cusip', 'ncusip']
+        cols_to_use = [c for c in fundq_perm.columns
+                       if c not in msf.columns
+                       and c != 'permno'
+                       and c not in meta_cols]
+
+        # CLEAN KEYS for merge_asof
+        # msf: date, permno must be non-null
+        msf = msf.dropna(subset=['date', 'permno'])
+        # fundq_perm: date, permno must be non-null
+        fundq_perm = fundq_perm.dropna(subset=['date', 'permno'])
+
+        # Ensure correct types
+        msf['permno'] = msf['permno'].astype(int)
+        fundq_perm['permno'] = fundq_perm['permno'].astype(int)
 
         # merge_asof
         merged = pd.merge_asof(
